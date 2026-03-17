@@ -139,22 +139,50 @@ Example entries:
 tail -f plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | jq .
 ```
 
-**Count flags vs false alarms:**
+### CLI summary script
+
 ```bash
-jq -r '.decision' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | sort | uniq -c | sort -rn
+# Today's summary
+npm run logs
+
+# Specific date
+node scripts/logs-summary.mjs 2026-03-17
+
+# All dates
+npm run logs:all
+
+# Last N recent events
+node scripts/logs-summary.mjs --recent 20
 ```
+
+Output includes:
+- Total flags, false alarms, escalations, mild responses
+- False alarm rate (%)
+- Top channels by event count
+- Recent events timeline
+
+### Static HTML viewer
+
+Open `scripts/logs-viewer.html` in any browser — no server needed.
+
+Drop a `banano-vibe-YYYY-MM-DD.jsonl` file onto it to get:
+- Summary cards (flags / false alarms / mild / escalations)
+- Top channels bar chart
+- Filterable, searchable event table
+
+### jq queries
 
 **All escalations:**
 ```bash
 jq 'select(.decision=="HIGH_ESCALATION")' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl
 ```
 
-**False alarm rate:**
+**Count by decision type:**
 ```bash
-jq -r 'select(.decision=="SENTIMENT_FLAG" or .decision=="FALSE_ALARM") | .decision' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | sort | uniq -c
+jq -r '.decision' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | sort | uniq -c | sort -rn
 ```
 
-Decisions written to the file: `SENTIMENT_FLAG`, `VIBE_CHECK_ENQUEUED`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
+Decisions in the file: `SENTIMENT_FLAG`, `VIBE_CHECK_ENQUEUED`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
 
 All decisions (including pass-throughs) are also in the main OpenClaw gateway log:
 ```bash
@@ -181,6 +209,10 @@ These are known limitations to revisit after launch with real traffic:
 - **Cleaner AI path** — long-term: dedicated moderation runtime instead of system-event injection/interception
 
 ## Changelog
+
+### v1.5.0
+- CLI summary script: `npm run logs` — flags, false alarms, escalations, top channels, recent events
+- Static HTML viewer: `scripts/logs-viewer.html` — drag-and-drop JSONL, filter/search, charts
 
 ### v1.4.0
 - Dedicated JSONL log: `plugin/logs/banano-vibe-YYYY-MM-DD.jsonl` (daily rotation, UTC)

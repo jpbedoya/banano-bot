@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Banano Vibe Monitor — Log Viewer</title>
+<style>
+  :root {
+    --bg: #0f0f0f;
+    --surface: #1a1a1a;
+    --border: #2a2a2a;
+    --text: #e0e0e0;
+    --dim: #666;
+    --accent: #f5a623;
+    --red: #ff4d4d;
+    --green: #4caf50;
+    --yellow: #f5a623;
+    --cyan: #29b6f6;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Menlo', 'Monaco', monospace; font-size: 13px; }
+
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header span { color: var(--dim); font-size: 12px; }
+
+  .drop-zone {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 48px;
+    text-align: center;
+    margin: 32px auto;
+    max-width: 480px;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); }
+  .drop-zone .emoji { font-size: 32px; margin-bottom: 12px; }
+  .drop-zone p { color: var(--dim); margin-top: 8px; font-size: 12px; }
+  .drop-zone input[type=file] { display: none; }
+
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    padding: 20px 24px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .stat-card .label { color: var(--dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+  .stat-card .value { font-size: 28px; font-weight: 700; }
+  .stat-card.flags .value { color: var(--yellow); }
+  .stat-card.false-alarms .value { color: var(--green); }
+  .stat-card.escalations .value { color: var(--red); }
+  .stat-card.mild .value { color: var(--cyan); }
+
+  .filters {
+    padding: 12px 24px;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    border-bottom: 1px solid var(--border);
+  }
+  .filter-btn {
+    padding: 4px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    transition: all 0.15s;
+  }
+  .filter-btn:hover { border-color: var(--accent); color: var(--text); }
+  .filter-btn.active { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 600; }
+
+  .search-bar {
+    padding: 10px 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  .search-bar input {
+    width: 100%;
+    max-width: 360px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 12px;
+    outline: none;
+  }
+  .search-bar input:focus { border-color: var(--accent); }
+
+  .events-table { width: 100%; border-collapse: collapse; }
+  .events-table th {
+    text-align: left;
+    padding: 10px 24px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+  }
+  .events-table td { padding: 8px 24px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .events-table tr:hover td { background: var(--surface); }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.SENTIMENT_FLAG { background: rgba(245,166,35,0.15); color: var(--yellow); }
+  .badge.FALSE_ALARM { background: rgba(76,175,80,0.15); color: var(--green); }
+  .badge.HIGH_ESCALATION { background: rgba(255,77,77,0.15); color: var(--red); }
+  .badge.MILD_RESPONSE { background: rgba(41,182,246,0.15); color: var(--cyan); }
+  .badge.VIBE_CHECK_ENQUEUED { background: rgba(41,182,246,0.08); color: var(--dim); }
+  .badge.COOLDOWN, .badge.DEDUPE { background: rgba(255,255,255,0.05); color: var(--dim); }
+  .badge.MOD_SILENCED, .badge.MOD_DENIED { background: rgba(255,77,77,0.1); color: #ff8a80; }
+  .badge.MOD_UNSILENCED { background: rgba(76,175,80,0.1); color: #81c784; }
+
+  .channel { font-family: monospace; color: var(--dim); font-size: 11px; }
+  .detail { color: var(--dim); font-size: 12px; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ts { color: var(--dim); font-size: 11px; white-space: nowrap; }
+
+  .channel-chart { padding: 20px 24px; }
+  .channel-chart h2 { font-size: 13px; color: var(--dim); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .channel-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .channel-row .name { color: var(--dim); font-size: 11px; width: 140px; overflow: hidden; text-overflow: ellipsis; }
+  .channel-row .bar-wrap { flex: 1; background: var(--surface); border-radius: 3px; height: 6px; }
+  .channel-row .bar { height: 6px; border-radius: 3px; background: var(--accent); }
+  .channel-row .count { color: var(--text); font-size: 12px; width: 32px; text-align: right; }
+
+  .empty { padding: 48px 24px; text-align: center; color: var(--dim); }
+  #app { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span>🦍</span>
+    <h1>Banano Vibe Monitor</h1>
+    <span id="file-label">no file loaded</span>
+  </header>
+  <div id="main-content">
+    <div class="drop-zone" id="drop-zone">
+      <div class="emoji">📂</div>
+      <div><strong>Drop a JSONL log file here</strong></div>
+      <p>or click to browse</p>
+      <p style="margin-top:8px">banano-vibe-YYYY-MM-DD.jsonl</p>
+      <input type="file" id="file-input" accept=".jsonl,.log,.txt">
+    </div>
+  </div>
+</div>
+
+<script>
+let allEvents = [];
+let activeFilter = 'ALL';
+let searchQuery = '';
+
+const DECISIONS = ['ALL','SENTIMENT_FLAG','FALSE_ALARM','MILD_RESPONSE','HIGH_ESCALATION','MOD_SILENCED','MOD_DENIED','COOLDOWN','DEDUPE'];
+
+function parseJSONL(text) {
+  return text.split('\n').filter(Boolean).map(line => {
+    try { return JSON.parse(line); } catch { return null; }
+  }).filter(Boolean);
+}
+
+function formatTime(ts) {
+  if (!ts) return '—';
+  try { return new Date(ts).toLocaleString(); } catch { return ts; }
+}
+
+function getDetail(e) {
+  if (e.preview) return `"${e.preview}"`;
+  if (e.reason) return e.reason;
+  if (e.severity) return `severity: ${e.severity}`;
+  if (e.score !== undefined) return `score: ${e.score}`;
+  return '';
+}
+
+function channelShort(ch) {
+  if (!ch) return '—';
+  return ch.length > 12 ? '…' + ch.slice(-8) : ch;
+}
+
+function render() {
+  const filtered = allEvents.filter(e => {
+    if (activeFilter !== 'ALL' && e.decision !== activeFilter) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const haystack = JSON.stringify(e).toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+
+  // Summary counts (always from all events)
+  const flags = allEvents.filter(e => e.decision === 'SENTIMENT_FLAG').length;
+  const falseAlarms = allEvents.filter(e => e.decision === 'FALSE_ALARM').length;
+  const escalations = allEvents.filter(e => e.decision === 'HIGH_ESCALATION').length;
+  const mild = allEvents.filter(e => e.decision === 'MILD_RESPONSE').length;
+  const enqueued = allEvents.filter(e => e.decision === 'VIBE_CHECK_ENQUEUED').length;
+  const farRate = enqueued > 0 ? Math.round(falseAlarms / enqueued * 100) : 0;
+
+  // Channel counts
+  const channelMap = {};
+  for (const e of allEvents) {
+    if (e.channel) channelMap[e.channel] = (channelMap[e.channel] || 0) + 1;
+  }
+  const topChannels = Object.entries(channelMap).sort((a,b) => b[1]-a[1]).slice(0,5);
+  const maxCh = topChannels[0]?.[1] || 1;
+
+  document.getElementById('main-content').innerHTML = `
+    <div class="summary-grid">
+      <div class="stat-card flags"><div class="label">Sentiment Flags</div><div class="value">${flags}</div></div>
+      <div class="stat-card false-alarms"><div class="label">False Alarms</div><div class="value">${falseAlarms} <span style="font-size:14px;color:var(--dim)">${farRate}%</span></div></div>
+      <div class="stat-card mild"><div class="label">Mild Responses</div><div class="value">${mild}</div></div>
+      <div class="stat-card escalations"><div class="label">Escalations</div><div class="value">${escalations}</div></div>
+    </div>
+
+    ${topChannels.length ? `
+    <div class="channel-chart">
+      <h2>Top Channels</h2>
+      ${topChannels.map(([ch, cnt]) => `
+        <div class="channel-row">
+          <div class="name" title="${ch}">${channelShort(ch)}</div>
+          <div class="bar-wrap"><div class="bar" style="width:${Math.round(cnt/maxCh*100)}%"></div></div>
+          <div class="count">${cnt}</div>
+        </div>
+      `).join('')}
+    </div>` : ''}
+
+    <div class="filters">
+      ${DECISIONS.map(d => `<button class="filter-btn ${activeFilter===d?'active':''}" data-decision="${d}">${d}</button>`).join('')}
+    </div>
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="Search channel, reason, preview…" value="${searchQuery}">
+    </div>
+
+    ${filtered.length === 0 ? '<div class="empty">No events match the current filter.</div>' : `
+    <table class="events-table">
+      <thead><tr>
+        <th>Time</th><th>Decision</th><th>Channel</th><th>Detail</th>
+      </tr></thead>
+      <tbody>
+        ${filtered.slice().reverse().map(e => `
+          <tr>
+            <td class="ts">${formatTime(e.ts)}</td>
+            <td><span class="badge ${e.decision}">${e.decision}</span></td>
+            <td class="channel">${channelShort(e.channel)}</td>
+            <td class="detail" title="${getDetail(e).replace(/"/g,'&quot;')}">${getDetail(e)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>`}
+  `;
+
+  // Re-attach events
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      activeFilter = btn.dataset.decision;
+      render();
+    });
+  });
+  const searchEl = document.getElementById('search-input');
+  if (searchEl) {
+    searchEl.addEventListener('input', e => { searchQuery = e.target.value; render(); });
+    searchEl.focus();
+  }
+}
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    allEvents = parseJSONL(e.target.result);
+    activeFilter = 'ALL';
+    searchQuery = '';
+    document.getElementById('file-label').textContent = `${file.name} — ${allEvents.length} events`;
+    render();
+  };
+  reader.readAsText(file);
+}
+
+// Drop zone
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+dropZone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+});
+</script>
+</body>
+</html>

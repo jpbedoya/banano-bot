@@ -5,7 +5,9 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "logs": "node scripts/logs-summary.mjs",
+    "logs:all": "node scripts/logs-summary.mjs --all"
   },
   "dependencies": {
     "sentiment": "^5.0.2"
