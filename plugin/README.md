@@ -14,7 +14,7 @@ npm install && npm run build
 openclaw plugins install .
 ```
 
-This copies the plugin into OpenClaw's plugin store (`~/.openclaw/plugins/banano-vibe/`). Logs, state, and config are all stored there — separate from your dev folder.
+This copies the plugin into OpenClaw's extensions directory (`~/.openclaw/extensions/banano-vibe/`). Logs, state, and config are all stored there — separate from your dev folder.
 
 ### Updating to a new version
 
