@@ -1,5 +1,5 @@
 /**
- * Banano Vibe Monitor — OpenClaw Plugin v1.2.0
+ * Banano Vibe Monitor — OpenClaw Plugin v1.5.0
  *
  * Two-layer vibe moderation for Discord channels:
  *   Layer 1: Local sentiment scoring (free, instant)
@@ -7,10 +7,10 @@
  *
  * Hooks:
  *   message_received → sentiment gate → AI review → response / escalation
- *   message_sending  → intercept tagged vibe check responses
+ *   message_sending  → intercept correlation-matched vibe check responses
  *
  * Install:
- *   openclaw plugins install -l ./plugin
+ *   openclaw plugins install ./plugin
  */
 
 import { shouldEscalate, getSentimentScore } from "./sentiment.js";
@@ -329,7 +329,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + AI review.",
-  version: "1.4.0",
+  version: "1.5.0",
 
   register(api: PluginApi) {
     const config = resolveConfig(api.pluginConfig);
@@ -349,6 +349,8 @@ const plugin = {
       logger.error("[banano-vibe] No Discord token in OpenClaw config — cannot operate");
       return;
     }
+    // Narrowed non-null token for use in closures
+    const token: string = discordToken;
 
     const stateDir = api.resolvePath(".");
     initState(stateDir);
@@ -358,7 +360,7 @@ const plugin = {
     const pendingChecks = new Map<string, PendingCheck>();
 
     logger.info(
-      `[banano-vibe] Active v1.2.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v1.5.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -379,7 +381,7 @@ const plugin = {
       description: "Show Banano vibe monitor status and pending checks",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.4.0**",
+          "🦍 **Banano Vibe Monitor v1.5.0**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -419,7 +421,7 @@ const plugin = {
     async function sendDiscord(channelId: string, content: string): Promise<void> {
       try {
         await api.runtime.channel.discord.sendMessageDiscord({
-          token: discordToken!,
+          token: token,
           channelId,
           content,
         });
@@ -445,7 +447,7 @@ const plugin = {
       }
 
       if (guildId && senderId) {
-        const member = await fetchMemberPermissions(discordToken!, guildId, senderId);
+        const member = await fetchMemberPermissions(token, guildId, senderId);
         if (config.modRoleIds.length > 0) {
           for (const role of member.roles) {
             if (config.modRoleIds.includes(role)) return true;
@@ -564,7 +566,7 @@ const plugin = {
       // ── Layer 2: AI vibe review ──────────────────────────────────────
       // P0 #2: Fetch recent context, filter bots/empty
       const recentMessages = await fetchRecentMessages(
-        discordToken!,
+        token,
         discordChannelId,
         messageId,
         config.maxRecentMessages,
@@ -641,7 +643,7 @@ const plugin = {
       const minOrder = severityOrder[config.modEscalationMinSeverity];
       const resultOrder = severityOrder[result.severity] ?? 2;
       const isHighSeverity = result.severity === "high";
-      const shouldEscalateToMod = resultOrder >= minOrder && !!config.modChannelId;
+      const escalateToMod = resultOrder >= minOrder && !!config.modChannelId;
 
       // In-channel response — skip if high severity and highSeverityPublicReply is false
       const shouldReplyPublicly = result.suggestedResponse &&
@@ -659,7 +661,7 @@ const plugin = {
       }
 
       // Mod escalation — with guild-based jump link
-      if (shouldEscalateToMod) {
+      if (escalateToMod) {
         const jumpLink = check.guildId && check.messageId
           ? `https://discord.com/channels/${check.guildId}/${check.channelId}/${check.messageId}`
           : check.messageId
