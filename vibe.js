@@ -3,9 +3,10 @@
  *
  * Used by both Option A (OpenClaw plugin) and Option B (standalone bot).
  * No Discord dependency here — pure logic.
+ *
+ * Supports Anthropic (Claude) and OpenAI (GPT) via AI_PROVIDER env var.
  */
 
-const Anthropic = require('@anthropic-ai/sdk');
 const Sentiment = require('sentiment');
 const { SYSTEM_PROMPT } = require('./persona');
 
@@ -13,27 +14,72 @@ const sentiment = new Sentiment();
 
 const DEFAULT_THRESHOLD = parseInt(process.env.SENTIMENT_THRESHOLD || '-2');
 
-let anthropic;
+// ── Provider config ──────────────────────────────────────────────────────────
+// AI_PROVIDER: "anthropic" (default) or "openai"
+// AI_MODEL: override the default model for your provider
+//
+// Defaults:
+//   anthropic → claude-haiku-4-5
+//   openai    → gpt-4o-mini
+
+const PROVIDER = (process.env.AI_PROVIDER || 'anthropic').toLowerCase();
+const MODEL = process.env.AI_MODEL || (PROVIDER === 'openai' ? 'gpt-4o-mini' : 'claude-haiku-4-5');
+
+let _client;
 function getClient() {
-  if (!anthropic) {
-    anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  if (_client) return _client;
+  if (PROVIDER === 'openai') {
+    const OpenAI = require('openai');
+    _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  } else {
+    const Anthropic = require('@anthropic-ai/sdk');
+    _client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   }
-  return anthropic;
+  return _client;
 }
 
 /**
+ * Unified completion — abstracts Anthropic vs OpenAI differences.
+ */
+async function complete(messages, maxTokens = 300) {
+  const client = getClient();
+
+  if (PROVIDER === 'openai') {
+    const response = await client.chat.completions.create({
+      model: MODEL,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT },
+        ...messages,
+      ],
+    });
+    return response.choices[0].message.content;
+  } else {
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: maxTokens,
+      system: SYSTEM_PROMPT,
+      messages,
+    });
+    return response.content[0].text;
+  }
+}
+
+// ── Public API ───────────────────────────────────────────────────────────────
+
+/**
  * Quick local sentiment check — free, instant.
- * Returns true if the message should be escalated to Haiku.
+ * Returns true if the message should be escalated to the AI.
  */
 function shouldEscalate(text, threshold = DEFAULT_THRESHOLD) {
   return sentiment.analyze(text).score <= threshold;
 }
 
 /**
- * Full vibe check via Claude Haiku.
- * @param {string} flaggedText - The message that triggered the flag
- * @param {string} authorName - Discord username of the author
- * @param {Array<{author: string, content: string}>} recentMessages - Last ~10 messages for context
+ * Full vibe check via AI model.
+ * @param {string} flaggedText
+ * @param {string} authorName
+ * @param {Array<{author: string, content: string}>} recentMessages
  * @returns {Promise<{isToxic: boolean, severity: 'low'|'medium'|'high', reason: string, suggestedResponse: string|null}>}
  */
 async function checkVibes(flaggedText, authorName, recentMessages = []) {
@@ -54,15 +100,9 @@ Is this genuinely toxic, negative, or harmful to community vibes? Answer in JSON
 }
 Only flag real issues. Jokes, sarcasm, and light trash talk are fine.`;
 
-  const response = await getClient().messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 200,
-    system: SYSTEM_PROMPT,
-    messages: [{ role: 'user', content: prompt }],
-  });
+  const text = await complete([{ role: 'user', content: prompt }], 200);
 
   try {
-    const text = response.content[0].text;
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) return JSON.parse(jsonMatch[0]);
   } catch (e) {
@@ -72,10 +112,10 @@ Only flag real issues. Jokes, sarcasm, and light trash talk are fine.`;
 }
 
 /**
- * Generate a reply as Banano given a message and channel history.
- * @param {string} userText - What the user said
- * @param {string} authorName - Their username
- * @param {Array<{role: 'user'|'assistant', content: string}>} history - Conversation history
+ * Generate a reply as Banano.
+ * @param {string} userText
+ * @param {string} authorName
+ * @param {Array<{role: 'user'|'assistant', content: string}>} history
  * @returns {Promise<string>}
  */
 async function generateReply(userText, authorName, history = []) {
@@ -83,15 +123,7 @@ async function generateReply(userText, authorName, history = []) {
     ...history,
     { role: 'user', content: `${authorName}: ${userText}` },
   ];
-
-  const response = await getClient().messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 300,
-    system: SYSTEM_PROMPT,
-    messages,
-  });
-
-  return response.content[0].text;
+  return complete(messages, 300);
 }
 
 module.exports = { shouldEscalate, checkVibes, generateReply };
