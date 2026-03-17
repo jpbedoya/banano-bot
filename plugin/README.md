@@ -123,27 +123,45 @@ For a stricter moderation community, set `highSeverityPublicReply: false` to esc
 
 ## Observability
 
-All decisions are logged as structured entries:
+### Dedicated JSONL log
 
+The plugin writes a daily JSONL log to `plugin/logs/banano-vibe-YYYY-MM-DD.jsonl` (UTC date). Only actionable decisions are written — noisy pass-throughs (`SENTIMENT_PASS`, `NOT_WATCHED`) are skipped.
+
+Example entries:
+```jsonl
+{"ts":"2026-03-17T18:34:00.000Z","decision":"SENTIMENT_FLAG","channel":"123...","score":-3,"preview":"this project is trash","author":"user123"}
+{"ts":"2026-03-17T18:34:02.000Z","decision":"FALSE_ALARM","channel":"123...","reason":"sarcastic banter","correlationId":"..."}
+{"ts":"2026-03-17T18:35:10.000Z","decision":"HIGH_ESCALATION","channel":"123...","severity":"high","reason":"personal attack","hasJumpLink":true}
 ```
-[banano-vibe] DECISION {"key":"value",...}
-```
 
-Decisions: `SILENCED`, `NOT_WATCHED`, `DEDUPE`, `COOLDOWN`, `SENTIMENT_PASS`, `SENTIMENT_FLAG`, `VIBE_CHECK_ENQUEUED`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`
-
-**Useful log queries:**
+**Tail live:**
 ```bash
-# False alarm rate
-grep 'FALSE_ALARM\|SENTIMENT_FLAG' openclaw.log | wc -l
-
-# All escalations
-grep 'HIGH_ESCALATION' openclaw.log
-
-# Cooldown suppression (may indicate noisy channel or threshold too aggressive)
-grep 'COOLDOWN' openclaw.log | wc -l
+tail -f plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | jq .
 ```
 
-Use `/vibe_stats` for a quick summary without log access.
+**Count flags vs false alarms:**
+```bash
+jq -r '.decision' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | sort | uniq -c | sort -rn
+```
+
+**All escalations:**
+```bash
+jq 'select(.decision=="HIGH_ESCALATION")' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl
+```
+
+**False alarm rate:**
+```bash
+jq -r 'select(.decision=="SENTIMENT_FLAG" or .decision=="FALSE_ALARM") | .decision' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | sort | uniq -c
+```
+
+Decisions written to the file: `SENTIMENT_FLAG`, `VIBE_CHECK_ENQUEUED`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
+
+All decisions (including pass-throughs) are also in the main OpenClaw gateway log:
+```bash
+grep "banano-vibe" ~/.openclaw/logs/gateway.log
+```
+
+Use `/vibe_stats` for a quick in-chat summary without touching the filesystem.
 
 ## Tuning guide
 
@@ -163,6 +181,11 @@ These are known limitations to revisit after launch with real traffic:
 - **Cleaner AI path** — long-term: dedicated moderation runtime instead of system-event injection/interception
 
 ## Changelog
+
+### v1.4.0
+- Dedicated JSONL log: `plugin/logs/banano-vibe-YYYY-MM-DD.jsonl` (daily rotation, UTC)
+- Only actionable decisions written (not noisy pass-throughs)
+- Best-effort write — plugin won't crash if log dir is unwritable
 
 ### v1.3.0
 - `/vibe_stats` command — flag, false alarm, escalation, cooldown counters

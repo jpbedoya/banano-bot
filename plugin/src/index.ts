@@ -18,6 +18,8 @@ import { buildVibeCheckPrompt, parseVibeResult } from "./vibe-check.js";
 import type { RecentMessage } from "./vibe-check.js";
 import { initState, isSilenced, silence, unsilence } from "./state.js";
 import * as crypto from "crypto";
+import * as fs from "fs";
+import * as path from "path";
 
 // ── Minimal types ────────────────────────────────────────────────────────────
 
@@ -273,12 +275,52 @@ type Decision =
   | "MOD_SILENCED"
   | "MOD_UNSILENCED";
 
+// Decisions worth persisting to the JSONL log (skip noisy pass-throughs)
+const LOGGED_DECISIONS = new Set<Decision>([
+  "SENTIMENT_FLAG",
+  "VIBE_CHECK_ENQUEUED",
+  "FALSE_ALARM",
+  "MILD_RESPONSE",
+  "HIGH_ESCALATION",
+  "MOD_DENIED",
+  "MOD_SILENCED",
+  "MOD_UNSILENCED",
+  "COOLDOWN",
+  "DEDUPE",
+]);
+
+let vibeLogDir: string | null = null;
+
+function initVibeLog(pluginDir: string): void {
+  vibeLogDir = path.join(pluginDir, "logs");
+  try {
+    if (!fs.existsSync(vibeLogDir)) fs.mkdirSync(vibeLogDir, { recursive: true });
+  } catch {
+    vibeLogDir = null;
+  }
+}
+
+function writeVibeLog(decision: Decision, meta: Record<string, unknown>): void {
+  if (!vibeLogDir) return;
+  try {
+    const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD UTC
+    const logPath = path.join(vibeLogDir, `banano-vibe-${date}.jsonl`);
+    const entry = JSON.stringify({ ts: new Date().toISOString(), decision, ...meta }) + "\n";
+    fs.appendFileSync(logPath, entry);
+  } catch {
+    // Best-effort — don't crash the plugin if logging fails
+  }
+}
+
 function logDecision(
   logger: PluginLogger,
   decision: Decision,
   meta: Record<string, unknown>,
 ): void {
   logger.info(`[banano-vibe] ${decision} ${JSON.stringify(meta)}`);
+  if (LOGGED_DECISIONS.has(decision)) {
+    writeVibeLog(decision, meta);
+  }
 }
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
@@ -287,7 +329,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + AI review.",
-  version: "1.2.0",
+  version: "1.4.0",
 
   register(api: PluginApi) {
     const config = resolveConfig(api.pluginConfig);
@@ -310,6 +352,7 @@ const plugin = {
 
     const stateDir = api.resolvePath(".");
     initState(stateDir);
+    initVibeLog(stateDir);
 
     // Correlation ID keyed pending checks
     const pendingChecks = new Map<string, PendingCheck>();
@@ -336,7 +379,7 @@ const plugin = {
       description: "Show Banano vibe monitor status and pending checks",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.3.0**",
+          "🦍 **Banano Vibe Monitor v1.4.0**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
