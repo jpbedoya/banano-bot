@@ -1,30 +1,34 @@
 /**
- * Banano Discord Bot — index.js
+ * index.js — Banano standalone bot (Option B)
  *
- * OPTION A (recommended): Banano runs inside OpenClaw.
- *   OpenClaw handles the Discord connection + message routing.
- *   This file is not needed — OpenClaw calls vibe.js directly.
- *   See: README.md → Option A setup
+ * Use this if you're NOT running inside OpenClaw.
+ * Requires DISCORD_TOKEN + AI provider key in .env
  *
- * OPTION B (standalone): Run this file directly.
- *   Requires DISCORD_TOKEN + ANTHROPIC_API_KEY in .env
- *   node index.js
+ * For Option A (OpenClaw): see README.md → Option A
  */
 
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
-const { shouldEscalate, checkVibes, generateReply } = require('./vibe');
+const { createVibeEngine } = require('./vibe');
 
-// ── Config ──────────────────────────────────────────────────────────────────
+// ── Config ───────────────────────────────────────────────────────────────────
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const MOD_CHANNEL_ID = process.env.MOD_CHANNEL_ID;
 const WATCHED_CHANNEL_IDS = (process.env.WATCHED_CHANNEL_IDS || '').split(',').filter(Boolean);
 
-// ── Persistent silence state ─────────────────────────────────────────────────
+if (!DISCORD_TOKEN) {
+  console.error('❌ Missing DISCORD_TOKEN in .env');
+  process.exit(1);
+}
+
+// ── Vibe engine (standalone — uses provider API keys from env) ────────────────
+
+const { shouldEscalate, checkVibes, generateReply } = createVibeEngine();
+
+// ── Persistent silence state ──────────────────────────────────────────────────
 
 const STATE_FILE = path.join(__dirname, 'state.json');
 
@@ -34,18 +38,14 @@ function loadState() {
       const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
       return new Set(data.silencedChannels || []);
     }
-  } catch (e) {
-    console.error('Failed to load state:', e);
-  }
+  } catch (e) { console.error('Failed to load state:', e); }
   return new Set();
 }
 
-function saveState(silencedChannels) {
+function saveState(silenced) {
   try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ silencedChannels: [...silencedChannels] }, null, 2));
-  } catch (e) {
-    console.error('Failed to save state:', e);
-  }
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ silencedChannels: [...silenced] }, null, 2));
+  } catch (e) { console.error('Failed to save state:', e); }
 }
 
 const silencedChannels = loadState();
@@ -65,21 +65,20 @@ function addToHistory(channelId, role, content) {
   if (history.length > 20) history.splice(0, history.length - 20);
 }
 
-// ── Discord client ───────────────────────────────────────────────────────────
+// ── Discord client ────────────────────────────────────────────────────────────
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.DirectMessages,
   ],
   partials: [Partials.Channel],
 });
 
 client.on('ready', () => {
-  console.log(`🦍 Banano is online as ${client.user.tag}`);
-  console.log(`Watching channels: ${WATCHED_CHANNEL_IDS.length ? WATCHED_CHANNEL_IDS.join(', ') : 'none (mention-only mode)'}`);
+  console.log(`🦍 Banano online as ${client.user.tag}`);
+  console.log(`Watching: ${WATCHED_CHANNEL_IDS.length ? WATCHED_CHANNEL_IDS.join(', ') : 'none (mention-only)'}`);
 });
 
 client.on('messageCreate', async (message) => {
@@ -88,11 +87,12 @@ client.on('messageCreate', async (message) => {
   const channelId = message.channel.id;
   const content = message.content.trim();
   const isMentioned = message.mentions.has(client.user);
-  const isWatchedChannel = WATCHED_CHANNEL_IDS.includes(channelId);
+  const isWatched = WATCHED_CHANNEL_IDS.includes(channelId);
+  const isMod = message.member?.permissions.has('ModerateMembers');
 
-  // Mod commands
+  // ── Mod controls ────────────────────────────────────────────────────────────
   if (content === '!banano stop') {
-    if (message.member?.permissions.has('ModerateMembers')) {
+    if (isMod) {
       silencedChannels.add(channelId);
       saveState(silencedChannels);
       await message.reply('aight aight, going quiet 🤫');
@@ -100,7 +100,7 @@ client.on('messageCreate', async (message) => {
     return;
   }
   if (content === '!banano start') {
-    if (message.member?.permissions.has('ModerateMembers')) {
+    if (isMod) {
       silencedChannels.delete(channelId);
       saveState(silencedChannels);
       await message.reply('ape is back 🦍');
@@ -110,7 +110,7 @@ client.on('messageCreate', async (message) => {
 
   if (silencedChannels.has(channelId)) return;
 
-  // ── Mention handler ──────────────────────────────────────────────────────
+  // ── Mention → normal reply ──────────────────────────────────────────────────
   if (isMentioned) {
     const userText = content.replace(/<@!?\d+>/g, '').trim() || 'gm';
     try {
@@ -121,14 +121,14 @@ client.on('messageCreate', async (message) => {
       addToHistory(channelId, 'assistant', reply);
       await message.reply(reply);
     } catch (err) {
-      console.error('Error responding to mention:', err);
+      console.error('[banano] mention reply error:', err);
     }
     return;
   }
 
-  // ── Vibe monitoring ──────────────────────────────────────────────────────
-  if (isWatchedChannel && shouldEscalate(content)) {
-    console.log(`[vibe-check] Flagged: "${content}"`);
+  // ── Watched channel → two-layer vibe filter ─────────────────────────────────
+  if (isWatched && shouldEscalate(content)) {
+    console.log(`[banano/vibe] Escalating: "${content}"`);
     try {
       const recent = await message.channel.messages.fetch({ limit: 10, before: message.id });
       const recentArr = [...recent.values()].reverse().map(m => ({
@@ -137,15 +137,17 @@ client.on('messageCreate', async (message) => {
       }));
 
       const result = await checkVibes(content, message.author.username, recentArr);
-      if (!result) return;
+      if (!result || !result.isToxic) return;
 
-      console.log('[vibe-check] Result:', result);
+      console.log(`[banano/vibe] ${result.severity}: ${result.reason}`);
 
-      if (result.isToxic && result.suggestedResponse) {
+      // Mild → in-channel redirect
+      if (result.suggestedResponse) {
         await message.channel.send(result.suggestedResponse);
       }
 
-      if (result.isToxic && result.severity === 'high' && MOD_CHANNEL_ID) {
+      // High severity → escalate to mod channel
+      if (result.severity === 'high' && MOD_CHANNEL_ID) {
         const modChannel = await client.channels.fetch(MOD_CHANNEL_ID).catch(() => null);
         if (modChannel) {
           await modChannel.send(
@@ -153,21 +155,14 @@ client.on('messageCreate', async (message) => {
             `User: ${message.author.tag}\n` +
             `Message: "${content}"\n` +
             `Reason: ${result.reason}\n` +
-            `[Jump to message](${message.url})`
+            `[Jump](${message.url})`
           );
         }
       }
     } catch (err) {
-      console.error('Error during vibe check:', err);
+      console.error('[banano] vibe check error:', err);
     }
   }
 });
-
-// ── Launch ───────────────────────────────────────────────────────────────────
-
-if (!DISCORD_TOKEN || !ANTHROPIC_API_KEY) {
-  console.error('❌ Missing DISCORD_TOKEN or ANTHROPIC_API_KEY in .env');
-  process.exit(1);
-}
 
 client.login(DISCORD_TOKEN);

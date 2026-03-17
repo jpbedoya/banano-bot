@@ -1,71 +1,147 @@
 # 🦍 Banano — MonkeDAO Discord AI Agent
 
-Banano is MonkeDAO's resident degen ape bot. Responds to mentions, hypes the community, and protects the vibes.
+Banano is MonkeDAO's resident degen ape. Responds to mentions, hypes the community, and runs two-layer vibe moderation to keep the energy right.
+
+---
+
+## How it works
+
+### Two-layer moderation
+
+```
+All messages in watched channels
+  │
+  ▼
+Layer 1: Sentiment score (free, local, instant)
+  │
+  ├── score > threshold → ignore (90%+ of messages)
+  │
+  └── score <= threshold → Layer 2: AI vibe review
+                              │
+                              ├── false alarm / banter → ignore
+                              ├── mild issue → Banano redirects in-channel
+                              └── high severity → quiet escalation to mod channel
+```
+
+### Sentiment threshold
+
+`SENTIMENT_THRESHOLD=-2` (recommended starting point)
+
+| Value | Behavior |
+|---|---|
+| -2 | Conservative — only clearly negative messages |
+| -1 | More sensitive |
+| 0 | Noisy — flags too much |
+
+### @Banano mentions
+
+Direct mentions always get a reply, bypassing the sentiment filter.
+
+---
 
 ## Setup
 
 ### Option A: OpenClaw (recommended)
 
-If you already have Banano running inside OpenClaw with Discord connected:
+If Banano already runs inside OpenClaw with Discord connected:
 
-**No API keys needed.** OpenClaw handles the model, routing, and API billing.
+**No provider API keys needed.** OpenClaw handles the model, auth, and routing.
 
-1. Copy the contents of `persona.js` → paste as Banano's system prompt in your OpenClaw config
-2. Add watched channel IDs + mod channel ID to your OpenClaw Discord plugin config
-3. Restart OpenClaw — Banano comes online
+**What this repo provides:**
+- `persona.js` — Banano's personality, hard rules, and vibe instructions (load as system prompt)
+- `vibe.js` — two-layer moderation logic; pass your OpenClaw `complete` function via `createVibeEngine({ complete })`
 
-That's it. `vibe.js` and `index.js` are **not needed** for Option A.
+**Steps:**
+1. Clone this repo into Banano's OpenClaw workspace
+2. Set `persona.js` content as Banano's system prompt in OpenClaw config
+3. In your OpenClaw message handler, wire `vibe.js` into the Discord flow:
 
-**What OpenClaw handles:**
-- Discord connection + message routing
-- The AI model (GPT-4o, Claude, whatever you've configured)
-- API keys and billing
-- Session/conversation history
+```js
+const { createVibeEngine } = require('./vibe');
 
-**What `persona.js` provides:**
-- Banano's full personality, hard rules, and vibe detection instructions baked into the system prompt
-- The model follows those instructions natively — no separate sentiment library needed
+// Pass OpenClaw's model function — no API keys needed
+const { shouldEscalate, checkVibes, generateReply } = createVibeEngine({
+  complete: async (messages, maxTokens) => {
+    // call your OpenClaw model runtime here
+  }
+});
+```
+
+4. Set env vars (watched channels, mod channel, threshold — no `DISCORD_TOKEN` or API keys needed)
+5. Restart OpenClaw — Banano is live
+
+**Message flow to implement in OpenClaw:**
+```
+if message mentions Banano → generateReply(...)
+else if channel in WATCHED_CHANNEL_IDS:
+  if shouldEscalate(content):
+    result = await checkVibes(content, author, recentMessages)
+    if result.isToxic and result.suggestedResponse → send in channel
+    if result.severity == 'high' → post to MOD_CHANNEL_ID
+```
 
 ---
 
 ### Option B: Standalone bot
 
-Run `index.js` directly on any server.
+Run `index.js` directly. Requires a Discord bot token + AI provider key.
 
 ```bash
 cp .env.example .env
-# Fill in DISCORD_TOKEN and ANTHROPIC_API_KEY
-# Add channel IDs for vibe monitoring
+# Fill in DISCORD_TOKEN, AI provider key, channel IDs
 
 npm install
 node index.js
 ```
 
 **Deploy on Railway:**
-Push to GitHub → connect repo → add env vars in Railway dashboard → deploy.
+Push to GitHub → connect repo → add env vars → deploy.
 
 ---
 
-## How it works
+## Config
 
-### Mention mode
-@Banano anything → Banano responds in character using Claude Haiku
+```env
+# Vibe monitoring
+WATCHED_CHANNEL_IDS=1483389953089077359   # comma-separated
+MOD_CHANNEL_ID=1483389841835167866
+SENTIMENT_THRESHOLD=-2
 
-### Vibe monitoring (optional)
-Set `WATCHED_CHANNEL_IDS` to monitor channels. Messages are scored locally (free, instant). Only negative-scoring messages get sent to Haiku for review. If genuinely toxic, Banano chimes in. High-severity issues get flagged to the mod channel.
-
-### Mod controls
-- `!banano stop` — silence Banano in current channel (mods only)
-- `!banano start` — bring Banano back (mods only)
+# Option B only
+DISCORD_TOKEN=...
+AI_PROVIDER=openai         # or anthropic
+AI_MODEL=gpt-4o-mini       # optional override
+OPENAI_API_KEY=...         # or ANTHROPIC_API_KEY
+```
 
 ---
 
-## Cost estimate (Claude Haiku)
-| Bot interactions/day | Monthly |
+## Mod controls
+
+- `!banano stop` — silence Banano in current channel (mods/admins only)
+- `!banano start` — re-enable Banano in current channel (mods/admins only)
+
+State persists across restarts via `state.json`.
+
+---
+
+## Test checklist
+
+- [ ] `@Banano gm` → normal reply in character
+- [ ] Positive message in watched channel → ignored
+- [ ] Clearly negative message → sentiment gate trips → AI review
+- [ ] Mild issue → gentle in-channel redirect from Banano
+- [ ] Serious issue → quiet escalation to mod channel
+- [ ] `!banano stop` → Banano goes quiet in that channel only
+- [ ] `!banano start` → Banano resumes
+
+---
+
+## Files
+
+| File | Purpose |
 |---|---|
-| 50 | ~$0.70 |
-| 200 | ~$2.70 |
-| 500 | ~$6.75 |
-| 1,000 | ~$13.50 |
-
-Set a $20/month hard cap in the Anthropic dashboard.
+| `persona.js` | Banano's system prompt — personality, hard rules, vibe instructions |
+| `vibe.js` | Two-layer moderation engine — works with any AI runtime |
+| `index.js` | Option B standalone bot (discord.js) |
+| `state.json` | Persisted silence state (gitignored) |
