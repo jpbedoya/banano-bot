@@ -1,0 +1,32 @@
+{
+  "id": "banano-vibe",
+  "name": "Banano Vibe Monitor",
+  "description": "Two-layer vibe moderation for Discord: local sentiment gate + AI review. Monitors watched channels, redirects bad vibes, escalates to mods.",
+  "version": "1.0.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "description": "Enable vibe monitoring (default: true)"
+      },
+      "watchedChannelIds": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Discord channel IDs to monitor for vibes"
+      },
+      "modChannelId": {
+        "type": "string",
+        "description": "Discord channel ID for mod escalations"
+      },
+      "sentimentThreshold": {
+        "type": "number",
+        "description": "Sentiment score threshold for escalation (default: -2)"
+      },
+      "maxRecentMessages": {
+        "type": "number",
+        "description": "Number of recent messages for AI context (default: 10)"
+      }
+    }
+  }
+}

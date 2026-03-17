@@ -41,44 +41,43 @@ Direct mentions always get a reply, bypassing the sentiment filter.
 
 ## Setup
 
-### Option A: OpenClaw (recommended)
+### Option A: OpenClaw Plugin (recommended)
 
 If Banano already runs inside OpenClaw with Discord connected:
 
 **No provider API keys needed.** OpenClaw handles the model, auth, and routing.
 
-**What this repo provides:**
-- `persona.js` — Banano's personality, hard rules, and vibe instructions (load as system prompt)
-- `vibe.js` — two-layer moderation logic; pass your OpenClaw `complete` function via `createVibeEngine({ complete })`
-
-**Steps:**
-1. Clone this repo into Banano's OpenClaw workspace
-2. Set `persona.js` content as Banano's system prompt in OpenClaw config
-3. In your OpenClaw message handler, wire `vibe.js` into the Discord flow:
-
-```js
-const { createVibeEngine } = require('./vibe');
-
-// Pass OpenClaw's model function — no API keys needed
-const { shouldEscalate, checkVibes, generateReply } = createVibeEngine({
-  complete: async (messages, maxTokens) => {
-    // call your OpenClaw model runtime here
-  }
-});
+```bash
+cd banano-bot/plugin
+npm install && npm run build
+openclaw plugins install -l .
 ```
 
-4. Set env vars (watched channels, mod channel, threshold — no `DISCORD_TOKEN` or API keys needed)
-5. Restart OpenClaw — Banano is live
+Then add to your OpenClaw config:
 
-**Message flow to implement in OpenClaw:**
+```yaml
+plugins:
+  entries:
+    banano-vibe:
+      enabled: true
+      config:
+        watchedChannelIds:
+          - "1483389953089077359"
+        modChannelId: "1483389841835167866"
+        sentimentThreshold: -2
+
+channels:
+  discord:
+    guilds:
+      YOUR_GUILD_ID:
+        channels:
+          "1483389953089077359":
+            requireMention: false
 ```
-if message mentions Banano → generateReply(...)
-else if channel in WATCHED_CHANNEL_IDS:
-  if shouldEscalate(content):
-    result = await checkVibes(content, author, recentMessages)
-    if result.isToxic and result.suggestedResponse → send in channel
-    if result.severity == 'high' → post to MOD_CHANNEL_ID
-```
+
+Restart OpenClaw. Done.
+
+See `plugin/README.md` for full details.
 
 ---
 
