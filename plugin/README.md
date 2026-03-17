@@ -5,10 +5,30 @@ Two-layer vibe moderation for Discord channels, running natively inside OpenClaw
 ## Install
 
 ```bash
+# 1. Clone and build
+git clone https://github.com/jpbedoya/banano-bot
 cd banano-bot/plugin
 npm install && npm run build
-openclaw plugins install -l .
+
+# 2. Copy-install into OpenClaw (isolated from dev code)
+openclaw plugins install .
 ```
+
+This copies the plugin into OpenClaw's plugin store (`~/.openclaw/plugins/banano-vibe/`). Logs, state, and config are all stored there — separate from your dev folder.
+
+### Updating to a new version
+
+```bash
+cd banano-bot/plugin
+git pull
+npm run build
+openclaw plugins install .   # re-copies, overwrites the installed version
+openclaw gateway restart
+```
+
+Prod only updates when you explicitly run these steps. A `git pull` in your dev folder has no effect until you reinstall.
+
+> **Note:** Do not use `openclaw plugins install -l .` (the `-l` / link flag). That loads directly from your dev folder and any file change takes effect on next restart — not safe for production.
 
 ## Configure
 
