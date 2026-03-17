@@ -8,7 +8,8 @@
     "dev": "tsc --watch",
     "deploy": "npm run build && openclaw plugins install . && openclaw gateway restart",
     "logs": "node scripts/logs-summary.mjs",
-    "logs:all": "node scripts/logs-summary.mjs --all"
+    "logs:all": "node scripts/logs-summary.mjs --all",
+    "logs:path": "echo ~/.openclaw/extensions/banano-vibe/logs"
   },
   "dependencies": {
     "sentiment": "^5.0.2"

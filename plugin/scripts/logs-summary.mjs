@@ -14,7 +14,15 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOGS_DIR = path.join(__dirname, "../logs");
+
+// Default to the installed extension logs dir; fall back to local dev logs
+const INSTALLED_LOGS = path.join(
+  process.env.HOME || "~",
+  ".openclaw/extensions/banano-vibe/logs"
+);
+const LOCAL_LOGS = path.join(__dirname, "../logs");
+const LOGS_DIR = process.env.LOGS_DIR ||
+  (fs.existsSync(INSTALLED_LOGS) ? INSTALLED_LOGS : LOCAL_LOGS);
 
 const COLORS = {
   reset: "\x1b[0m",

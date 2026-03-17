@@ -145,9 +145,12 @@ For a stricter moderation community, set `highSeverityPublicReply: false` to esc
 
 ### Dedicated JSONL log
 
-The plugin writes a daily JSONL log to `logs/banano-vibe-YYYY-MM-DD.jsonl` inside the plugin folder (UTC date). The log folder is always relative to wherever you cloned the repo and ran `openclaw plugins install -l .` — e.g. if you installed from `~/banano-bot/plugin`, logs are at `~/banano-bot/plugin/logs/`.
+After a copied install (`npm run deploy`), logs live at:
+```
+~/.openclaw/extensions/banano-vibe/logs/banano-vibe-YYYY-MM-DD.jsonl
+```
 
-Only actionable decisions are written — noisy pass-throughs (`SENTIMENT_PASS`, `NOT_WATCHED`) are skipped.
+One JSON object per line, daily rotation by UTC date. Only actionable decisions are written — noisy pass-throughs (`SENTIMENT_PASS`, `NOT_WATCHED`) are skipped.
 
 Example entries:
 ```jsonl
@@ -158,14 +161,17 @@ Example entries:
 
 **Tail live:**
 ```bash
-tail -f plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | jq .
+LOGDIR=~/.openclaw/extensions/banano-vibe/logs
+tail -f $LOGDIR/banano-vibe-$(date -u +%Y-%m-%d).jsonl | jq .
 ```
 
 ### CLI summary script
 
+Run from the dev folder (`~/banano-bot/plugin`):
+
 ```bash
-# Today's summary
-npm run logs
+# Today's summary (reads from installed extension logs)
+LOGS_DIR=~/.openclaw/extensions/banano-vibe/logs npm run logs
 
 # Specific date
 node scripts/logs-summary.mjs 2026-03-17
@@ -187,21 +193,22 @@ Output includes:
 
 Open `scripts/logs-viewer.html` in any browser — no server needed.
 
-Drop a `banano-vibe-YYYY-MM-DD.jsonl` file onto it to get:
+Drop a `banano-vibe-YYYY-MM-DD.jsonl` file from `~/.openclaw/extensions/banano-vibe/logs/` onto it to get:
 - Summary cards (flags / false alarms / mild / escalations)
 - Top channels bar chart
 - Filterable, searchable event table
 
 ### jq queries
 
-**All escalations:**
 ```bash
-jq 'select(.decision=="HIGH_ESCALATION")' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl
-```
+LOGDIR=~/.openclaw/extensions/banano-vibe/logs
+DATE=$(date -u +%Y-%m-%d)
 
-**Count by decision type:**
-```bash
-jq -r '.decision' plugin/logs/banano-vibe-$(date -u +%Y-%m-%d).jsonl | sort | uniq -c | sort -rn
+# All escalations
+jq 'select(.decision=="HIGH_ESCALATION")' $LOGDIR/banano-vibe-$DATE.jsonl
+
+# Count by decision type
+jq -r '.decision' $LOGDIR/banano-vibe-$DATE.jsonl | sort | uniq -c | sort -rn
 ```
 
 Decisions in the file: `SENTIMENT_FLAG`, `VIBE_CHECK_ENQUEUED`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
