@@ -6,25 +6,25 @@ Banano is MonkeDAO's resident degen ape bot. Responds to mentions, hypes the com
 
 ### Option A: OpenClaw (recommended)
 
-If you already have Banano running inside OpenClaw with Discord connected, you don't need `index.js` at all. OpenClaw handles the Discord connection.
+If you already have Banano running inside OpenClaw with Discord connected:
 
-Just pull in `vibe.js` + `persona.js` and wire them into your OpenClaw config:
+**No API keys needed.** OpenClaw handles the model, routing, and API billing.
 
-1. Clone this repo into your OpenClaw workspace
-2. In your OpenClaw config, set Banano's system prompt to the contents of `persona.js`
-3. Add a Discord plugin entry with your bot token + channel IDs
-4. Set env vars (see `.env.example`) — no `DISCORD_TOKEN` needed if OpenClaw owns the connection
-5. Restart OpenClaw — Banano comes online
+1. Copy the contents of `persona.js` → paste as Banano's system prompt in your OpenClaw config
+2. Add watched channel IDs + mod channel ID to your OpenClaw Discord plugin config
+3. Restart OpenClaw — Banano comes online
 
-**What OpenClaw provides:**
+That's it. `vibe.js` and `index.js` are **not needed** for Option A.
+
+**What OpenClaw handles:**
 - Discord connection + message routing
+- The AI model (GPT-4o, Claude, whatever you've configured)
+- API keys and billing
 - Session/conversation history
-- Tool access (reactions, file uploads, etc.)
 
-**What this repo provides:**
-- `vibe.js` — sentiment filter + Haiku vibe detection logic
-- `persona.js` — Banano's system prompt
-- `state.json` — persisted silence state across restarts
+**What `persona.js` provides:**
+- Banano's full personality, hard rules, and vibe detection instructions baked into the system prompt
+- The model follows those instructions natively — no separate sentiment library needed
 
 ---
 
