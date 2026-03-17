@@ -4,33 +4,45 @@ Banano is MonkeDAO's resident degen ape bot. Responds to mentions, hypes the com
 
 ## Setup
 
-### 1. Create the Discord Bot
-1. Go to https://discord.com/developers/applications
-2. New Application → name it "Banano"
-3. Bot tab → Add Bot → copy the token
-4. Under "Privileged Gateway Intents" → enable **Message Content Intent**
-5. OAuth2 → URL Generator → scopes: `bot` → permissions: `Send Messages`, `Read Message History`, `Moderate Members`
-6. Use the generated URL to invite Banano to the MonkeDAO server
+### Option A: OpenClaw (recommended)
 
-### 2. Configure
+If you already have Banano running inside OpenClaw with Discord connected, you don't need `index.js` at all. OpenClaw handles the Discord connection.
+
+Just pull in `vibe.js` + `persona.js` and wire them into your OpenClaw config:
+
+1. Clone this repo into your OpenClaw workspace
+2. In your OpenClaw config, set Banano's system prompt to the contents of `persona.js`
+3. Add a Discord plugin entry with your bot token + channel IDs
+4. Set env vars (see `.env.example`) — no `DISCORD_TOKEN` needed if OpenClaw owns the connection
+5. Restart OpenClaw — Banano comes online
+
+**What OpenClaw provides:**
+- Discord connection + message routing
+- Session/conversation history
+- Tool access (reactions, file uploads, etc.)
+
+**What this repo provides:**
+- `vibe.js` — sentiment filter + Haiku vibe detection logic
+- `persona.js` — Banano's system prompt
+- `state.json` — persisted silence state across restarts
+
+---
+
+### Option B: Standalone bot
+
+Run `index.js` directly on any server.
+
 ```bash
 cp .env.example .env
 # Fill in DISCORD_TOKEN and ANTHROPIC_API_KEY
-# Optionally add channel IDs for vibe monitoring
-```
+# Add channel IDs for vibe monitoring
 
-### 3. Run
-```bash
 npm install
 node index.js
 ```
 
-### 4. Deploy (Railway)
-```bash
-# Push to GitHub, connect repo to Railway
-# Add env vars in Railway dashboard
-# Deploy — done
-```
+**Deploy on Railway:**
+Push to GitHub → connect repo → add env vars in Railway dashboard → deploy.
 
 ---
 
