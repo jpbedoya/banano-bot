@@ -713,7 +713,7 @@ const plugin = {
 
       // ── Layer 1: Sentiment gate ──────────────────────────────────────
       const score = getSentimentScore(content);
-      if (!shouldEscalate(content, config.sentimentThreshold)) {
+      if (score > config.sentimentThreshold) {
         logDecision(logger, "SENTIMENT_PASS", {
           score,
           threshold: config.sentimentThreshold,
@@ -723,7 +723,7 @@ const plugin = {
       }
 
       stats.flagged++;
-      claimChannelReply(discordChannelId, config.vibeReviewTimeoutMs + 15_000);
+      claimChannelReply(discordChannelId, config.vibeReviewTimeoutMs * 2 + 15_000);
       logDecision(logger, "SENTIMENT_FLAG", {
         score,
         threshold: config.sentimentThreshold,
@@ -784,8 +784,6 @@ const plugin = {
           const jumpLink =
             guildId && messageId
               ? `https://discord.com/channels/${guildId}/${discordChannelId}/${messageId}`
-              : messageId
-              ? `https://discord.com/channels/@me/${discordChannelId}/${messageId}`
               : null;
           const alert = [
             `⚠️ **Vibe review failed twice** in <#${discordChannelId}>`,
@@ -828,6 +826,7 @@ const plugin = {
 
       if (!result.isToxic) {
         stats.falseAlarms++;
+        claimedChannelReplies.delete(discordChannelId);
         logDecision(logger, "FALSE_ALARM", {
           correlationId,
           reason: result.reason,
@@ -863,8 +862,6 @@ const plugin = {
         const jumpLink =
           guildId && messageId
             ? `https://discord.com/channels/${guildId}/${discordChannelId}/${messageId}`
-            : messageId
-            ? `https://discord.com/channels/@me/${discordChannelId}/${messageId}`
             : null;
 
         const alert = [
