@@ -216,6 +216,8 @@ function resolveDiscordContext(
 function resolveAuthorName(msg: MessageReceivedEvent, metadata: Record<string, unknown> | undefined): string {
   const md = metadata || {};
   const candidates = [
+    typeof md.senderName === "string" ? md.senderName : null,
+    typeof md.senderUsername === "string" ? md.senderUsername : null,
     typeof md.username === "string" ? md.username : null,
     typeof md.tag === "string" ? md.tag : null,
     typeof md.name === "string" ? md.name : null,
@@ -231,6 +233,8 @@ function resolveAuthorName(msg: MessageReceivedEvent, metadata: Record<string, u
     return trimmed;
   }
 
+  const senderId = typeof md.senderId === "string" ? md.senderId.trim() : "";
+  if (senderId) return `user:${senderId}`;
   return "unknown";
 }
 
@@ -293,6 +297,8 @@ async function fetchMemberPermissions(
 
 const handledMessages = new Map<string, number>();
 const channelCooldowns = new Map<string, number>();
+const claimedChannelReplies = new Map<string, number>();
+const allowedPluginMessages = new Map<string, number>();
 
 function isDuplicate(messageId: string, windowMs: number): boolean {
   const now = Date.now();
@@ -313,6 +319,37 @@ function markAction(channelId: string): void {
   channelCooldowns.set(channelId, Date.now());
 }
 
+function cleanupExpiringMap(map: Map<string, number>, now = Date.now()): void {
+  for (const [key, expiresAt] of map) {
+    if (expiresAt <= now) map.delete(key);
+  }
+}
+
+function claimChannelReply(channelId: string, windowMs: number): void {
+  cleanupExpiringMap(claimedChannelReplies);
+  claimedChannelReplies.set(channelId, Date.now() + windowMs);
+}
+
+function isClaimedChannelReply(channelId: string): boolean {
+  cleanupExpiringMap(claimedChannelReplies);
+  const expiresAt = claimedChannelReplies.get(channelId);
+  return !!expiresAt && expiresAt > Date.now();
+}
+
+function allowPluginMessage(channelId: string, content: string, windowMs = 15_000): void {
+  cleanupExpiringMap(allowedPluginMessages);
+  allowedPluginMessages.set(`${channelId}::${content}`, Date.now() + windowMs);
+}
+
+function consumeAllowedPluginMessage(channelId: string, content: string): boolean {
+  cleanupExpiringMap(allowedPluginMessages);
+  const key = `${channelId}::${content}`;
+  const expiresAt = allowedPluginMessages.get(key);
+  if (!expiresAt || expiresAt <= Date.now()) return false;
+  allowedPluginMessages.delete(key);
+  return true;
+}
+
 // ── Structured log helper ─────────────────────────────────────────────────────
 
 type Decision =
@@ -322,7 +359,10 @@ type Decision =
   | "COOLDOWN"
   | "SENTIMENT_PASS"
   | "SENTIMENT_FLAG"
+  | "TURN_CLAIMED"
+  | "NORMAL_REPLY_SUPPRESSED"
   | "VIBE_CHECK_START"
+  | "VIBE_CHECK_RETRY"
   | "VIBE_CHECK_TIMEOUT"
   | "VIBE_CHECK_ERROR"
   | "FALSE_ALARM"
@@ -334,7 +374,10 @@ type Decision =
 
 const LOGGED_DECISIONS = new Set<Decision>([
   "SENTIMENT_FLAG",
+  "TURN_CLAIMED",
+  "NORMAL_REPLY_SUPPRESSED",
   "VIBE_CHECK_START",
+  "VIBE_CHECK_RETRY",
   "VIBE_CHECK_TIMEOUT",
   "VIBE_CHECK_ERROR",
   "FALSE_ALARM",
@@ -476,6 +519,7 @@ const plugin = {
     async function sendDiscord(channelId: string, content: string, replyToMessageId?: string): Promise<void> {
       try {
         const text = typeof content === "string" ? content : String(content ?? "");
+        allowPluginMessage(channelId, text);
         await api.runtime.channel.discord.sendMessageDiscord(`channel:${channelId}`, text, {
           cfg: api.config,
           replyTo: replyToMessageId,
@@ -525,50 +569,76 @@ const plugin = {
     async function runVibeReview(
       prompt: string,
       correlationId: string,
-    ): Promise<string | null> {
-      const sessionKey = `banano-vibe:check:${correlationId}`;
-      try {
-        const { runId } = await api.runtime.subagent.run({
-          sessionKey,
-          message: prompt,
-          idempotencyKey: correlationId,
-          deliver: false, // don't send to any channel
-        });
+    ): Promise<{ raw: string | null; error?: string; attempts: number }> {
+      let lastError: string | undefined;
 
-        const waited = await api.runtime.subagent.waitForRun({
-          runId,
-          timeoutMs: config.vibeReviewTimeoutMs,
-        });
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const sessionKey = `banano-vibe:check:${correlationId}:${attempt}`;
+        try {
+          const { runId } = await api.runtime.subagent.run({
+            sessionKey,
+            message: prompt,
+            idempotencyKey: `${correlationId}:${attempt}`,
+            deliver: false,
+          });
 
-        if (waited.status !== "ok") {
-          logger.warn(`[banano-vibe] Vibe review ${waited.status}: ${waited.error ?? ""}`);
-          return null;
-        }
+          const waited = await api.runtime.subagent.waitForRun({
+            runId,
+            timeoutMs: config.vibeReviewTimeoutMs,
+          });
 
-        const { messages } = await api.runtime.subagent.getSessionMessages({
-          sessionKey,
-          limit: 5,
-        });
+          if (waited.status !== "ok") {
+            lastError = `attempt ${attempt}: ${waited.status}${waited.error ? ` (${waited.error})` : ""}`;
+            logger.warn(`[banano-vibe] Vibe review ${lastError}`);
+            continue;
+          }
 
-        // Find last assistant text message
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const m = messages[i] as { role?: string; content?: unknown };
-          if (m.role !== "assistant") continue;
-          const content = m.content;
-          if (typeof content === "string" && content.trim()) return content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              const b = block as { type?: string; text?: string };
-              if (b.type === "text" && b.text?.trim()) return b.text;
+          const { messages } = await api.runtime.subagent.getSessionMessages({
+            sessionKey,
+            limit: 5,
+          });
+
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const m = messages[i] as { role?: string; content?: unknown };
+            if (m.role !== "assistant") continue;
+            const content = m.content;
+            if (typeof content === "string" && content.trim()) return { raw: content, attempts: attempt };
+            if (Array.isArray(content)) {
+              for (const block of content) {
+                const b = block as { type?: string; text?: string };
+                if (b.type === "text" && b.text?.trim()) return { raw: b.text, attempts: attempt };
+              }
             }
           }
+
+          lastError = `attempt ${attempt}: empty assistant response`;
+        } catch (err) {
+          lastError = `attempt ${attempt}: ${err instanceof Error ? err.message : String(err)}`;
+          logger.warn(`[banano-vibe] Vibe review error ${lastError}`);
+        } finally {
+          api.runtime.subagent.deleteSession({ sessionKey, deleteTranscript: true }).catch(() => {});
         }
-        return null;
-      } finally {
-        // Clean up the isolated session
-        api.runtime.subagent.deleteSession({ sessionKey, deleteTranscript: true }).catch(() => {});
       }
+
+      return { raw: null, error: lastError, attempts: 2 };
     }
+
+    // ── message_sending hook ────────────────────────────────────────────
+    api.on("message_sending", async (event: unknown, ctx: unknown) => {
+      const outgoing = event as { to?: string; content?: string; metadata?: Record<string, unknown> };
+      const msgCtx = ctx as MessageContext;
+      const content = typeof outgoing.content === "string" ? outgoing.content.trim() : "";
+      const target = typeof outgoing.to === "string" ? outgoing.to : "";
+      const channelId = extractTrailingId(target) || extractTrailingId(msgCtx.conversationId) || extractTrailingId(msgCtx.channelId);
+      if (!channelId || !config.watchedChannelIds.includes(channelId)) return {};
+      if (consumeAllowedPluginMessage(channelId, content)) return {};
+      if (!isClaimedChannelReply(channelId)) return {};
+      logDecision(logger, "NORMAL_REPLY_SUPPRESSED", {
+        channel: channelId,
+        preview: content.slice(0, 100),
+      });
+      return { cancel: true };
+    });
 
     // ── message_received hook ────────────────────────────────────────────
     api.on("message_received", async (event: unknown, ctx: unknown) => {
@@ -593,6 +663,7 @@ const plugin = {
 
       const messageId = (metadata.messageId ?? metadata.message_id ?? metadata.id) as string | undefined;
       const guildId = (metadata.guildId ?? metadata.guild_id) as string | undefined;
+      const authorId = (metadata.senderId ?? metadata.userId ?? metadata.sender_id ?? metadata.user_id) as string | undefined;
       const authorName = resolveAuthorName(msg, metadata);
 
       // ── Mod controls ─────────────────────────────────────────────────
@@ -652,12 +723,20 @@ const plugin = {
       }
 
       stats.flagged++;
+      claimChannelReply(discordChannelId, config.vibeReviewTimeoutMs + 15_000);
       logDecision(logger, "SENTIMENT_FLAG", {
         score,
         threshold: config.sentimentThreshold,
         channel: discordChannelId,
         preview: content.slice(0, 60),
         author: authorName,
+        authorId,
+      });
+      logDecision(logger, "TURN_CLAIMED", {
+        channel: discordChannelId,
+        messageId,
+        author: authorName,
+        authorId,
       });
 
       // ── Layer 2: Isolated AI vibe review ─────────────────────────────
@@ -676,25 +755,74 @@ const plugin = {
         correlationId,
         channel: discordChannelId,
         author: authorName,
+        authorId,
       });
 
-      const rawResult = await runVibeReview(vibePrompt, correlationId);
+      const review = await runVibeReview(vibePrompt, correlationId);
+      if (review.attempts > 1) {
+        logDecision(logger, "VIBE_CHECK_RETRY", {
+          correlationId,
+          channel: discordChannelId,
+          author: authorName,
+          authorId,
+          attempts: review.attempts,
+          error: review.error,
+        });
+      }
 
-      if (!rawResult) {
+      if (!review.raw) {
         stats.reviewErrors++;
-        logDecision(logger, "VIBE_CHECK_ERROR", { correlationId, channel: discordChannelId });
+        const errorSummary = review.error || "unknown review failure";
+        logDecision(logger, "VIBE_CHECK_ERROR", {
+          correlationId,
+          channel: discordChannelId,
+          author: authorName,
+          authorId,
+          error: errorSummary,
+        });
+        if (config.modChannelId) {
+          const jumpLink =
+            guildId && messageId
+              ? `https://discord.com/channels/${guildId}/${discordChannelId}/${messageId}`
+              : messageId
+              ? `https://discord.com/channels/@me/${discordChannelId}/${messageId}`
+              : null;
+          const alert = [
+            `⚠️ **Vibe review failed twice** in <#${discordChannelId}>`,
+            `**User:** ${authorName}${authorId ? ` (<@${authorId}>)` : ""}`,
+            `**User ID:** ${authorId ?? "unknown"}`,
+            `**Message:** "${content.slice(0, 200)}"`,
+            `**Error:** ${errorSummary}`,
+          ];
+          if (jumpLink) alert.push(`[Jump to message](${jumpLink})`);
+          await sendDiscord(config.modChannelId, alert.join("\n"));
+        }
         return;
       }
 
-      const result = parseVibeResult(rawResult);
+      const result = parseVibeResult(review.raw);
       if (!result) {
         stats.reviewErrors++;
         logDecision(logger, "VIBE_CHECK_ERROR", {
           correlationId,
           channel: discordChannelId,
+          author: authorName,
+          authorId,
           reason: "parse failure",
-          raw: rawResult.slice(0, 200),
+          raw: review.raw.slice(0, 200),
         });
+        if (config.modChannelId) {
+          await sendDiscord(
+            config.modChannelId,
+            [
+              `⚠️ **Vibe review parse failure** in <#${discordChannelId}>`,
+              `**User:** ${authorName}${authorId ? ` (<@${authorId}>)` : ""}`,
+              `**User ID:** ${authorId ?? "unknown"}`,
+              `**Message:** "${content.slice(0, 200)}"`,
+              `**Raw:** \`${review.raw.slice(0, 180)}\``,
+            ].join("\n"),
+          );
+        }
         return;
       }
 
@@ -741,7 +869,8 @@ const plugin = {
 
         const alert = [
           `🚨 **Vibe alert** in <#${discordChannelId}>`,
-          `**User:** ${authorName}`,
+          `**User:** ${authorName}${authorId ? ` (<@${authorId}>)` : ""}`,
+          `**User ID:** ${authorId ?? "unknown"}`,
           `**Message:** "${content.slice(0, 200)}"`,
           `**Severity:** ${result.severity}`,
           `**Reason:** ${result.reason}`,
@@ -757,6 +886,8 @@ const plugin = {
           correlationId,
           severity: result.severity,
           channel: discordChannelId,
+          author: authorName,
+          authorId,
           reason: result.reason,
           hasJumpLink: !!jumpLink,
           silentEscalation: isHighSeverity && !config.highSeverityPublicReply,

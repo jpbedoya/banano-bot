@@ -69,8 +69,7 @@ plugins:
         dedupeWindowMs: 60000      # ignore duplicate message events
         maxRecentMessages: 10      # AI context window size
         contextFilterBots: true    # filter bot messages from AI context
-        pendingCheckTimeoutMs: 60000
-        maxPendingChecks: 20
+        vibeReviewTimeoutMs: 30000 # isolated AI review timeout
 ```
 
 Also set `requireMention: false` on watched channels so Banano sees every message:
@@ -99,13 +98,17 @@ Layer 1: Sentiment score (free, local)
   │
   └── score <= threshold ──→ dedupe check ──→ cooldown check
                                                     │
+                                            claim the turn (suppress normal Banano reply)
+                                                    │
                                             Layer 2: AI vibe review
                                             (with last ~10 messages for context)
                                                     │
-                                            ├── false alarm → ignore
+                                            ├── false alarm → ignore publicly
                                             ├── mild → in-channel redirect
-                                            └── high → mod escalation
-                                                         + public reply (if highSeverityPublicReply)
+                                            ├── high → mod escalation
+                                            │            + public reply (if highSeverityPublicReply)
+                                            └── review failure → retry once silently,
+                                                         then mod-only failure alert
 ```
 
 ### Escalation policy
@@ -122,11 +125,12 @@ Layer 1: Sentiment score (free, local)
 
 For a stricter moderation community, set `highSeverityPublicReply: false` to escalate silently.
 
-### Security
+### Security / safety behavior
 
 - **Mod auth:** `!banano stop/start` verifies Discord permissions (ModerateMembers or Administrator). Configure `modRoleIds`/`modUserIds` for explicit control — don't rely on permission fallback alone in production.
-- **Correlation IDs:** every vibe check gets a UUID; interception only fires on exact match, no cross-talk between concurrent checks.
-- **Response interception:** vibe check responses are tagged and consumed before reaching chat. Raw JSON never leaks to users.
+- **Claimed turns:** once a watched-channel message trips moderation, Banano claims that turn and suppresses normal assistant replies in that channel for the moderation window.
+- **Retry once on model failure:** AI review is retried silently one time before being treated as failed.
+- **No raw provider errors in watched chat:** if both review attempts fail, Banano logs the failure and alerts the mod channel only.
 - **Context-aware:** AI review includes last ~10 messages, preventing false flags on sarcasm/banter.
 - **Fails closed:** if permission check fails, mod commands are denied.
 
@@ -154,9 +158,10 @@ One JSON object per line, daily rotation by UTC date. Only actionable decisions 
 
 Example entries:
 ```jsonl
-{"ts":"2026-03-17T18:34:00.000Z","decision":"SENTIMENT_FLAG","channel":"123...","score":-3,"preview":"this project is trash","author":"user123"}
+{"ts":"2026-03-17T18:34:00.000Z","decision":"SENTIMENT_FLAG","channel":"123...","score":-3,"preview":"this project is trash","author":"user123","authorId":"4280..."}
+{"ts":"2026-03-17T18:34:00.100Z","decision":"TURN_CLAIMED","channel":"123...","messageId":"1483...","author":"user123","authorId":"4280..."}
 {"ts":"2026-03-17T18:34:02.000Z","decision":"FALSE_ALARM","channel":"123...","reason":"sarcastic banter","correlationId":"..."}
-{"ts":"2026-03-17T18:35:10.000Z","decision":"HIGH_ESCALATION","channel":"123...","severity":"high","reason":"personal attack","hasJumpLink":true}
+{"ts":"2026-03-17T18:35:10.000Z","decision":"HIGH_ESCALATION","channel":"123...","severity":"high","reason":"personal attack","author":"user123","authorId":"4280...","hasJumpLink":true}
 ```
 
 **Tail live:**
@@ -211,7 +216,7 @@ jq 'select(.decision=="HIGH_ESCALATION")' $LOGDIR/banano-vibe-$DATE.jsonl
 jq -r '.decision' $LOGDIR/banano-vibe-$DATE.jsonl | sort | uniq -c | sort -rn
 ```
 
-Decisions in the file: `SENTIMENT_FLAG`, `VIBE_CHECK_ENQUEUED`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
+Decisions in the file: `SENTIMENT_FLAG`, `TURN_CLAIMED`, `NORMAL_REPLY_SUPPRESSED`, `VIBE_CHECK_START`, `VIBE_CHECK_RETRY`, `VIBE_CHECK_ERROR`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
 
 All decisions (including pass-throughs) are also in the main OpenClaw gateway log:
 ```bash
@@ -235,7 +240,7 @@ These are known limitations to revisit after launch with real traffic:
 
 - **Per-user cooldown** — repeated offender tracking, anti-pile-on behavior
 - **Context quality** — trim repetitive spam, skip very short noise
-- **Cleaner AI path** — long-term: dedicated moderation runtime instead of system-event injection/interception
+- **Suppression scope** — turn-claim suppression is channel-scoped and time-window based; if you want even tighter ownership, move moderation to a dedicated bot/session surface
 
 ## Changelog
 
@@ -254,13 +259,21 @@ These are known limitations to revisit after launch with real traffic:
 - Stats counters wired to all decision paths
 - Silent escalation note in mod alert when `highSeverityPublicReply: false`
 
+### v1.1.1
+- Fixed isolated review runtime call to include `idempotencyKey`
+- Fixed Discord send path to use OpenClaw's native `sendMessageDiscord(target, text, opts)` signature
+- Fixed Discord author attribution using `senderName` / `senderUsername`
+- Added `authorId` to logs and mod escalations for reliable later moderation actions
+- Claimed-turn suppression: when moderation triggers, Banano suppresses normal watched-channel replies for that turn
+- Retry-once moderation review failure handling, with second failure logged and sent to mod channel only
+- Removed stale config docs for `pendingCheckTimeoutMs` / `maxPendingChecks`
+
 ### v0.2.0
 - Correlation IDs — UUID per check, exact-match interception
 - Jump links — correct `discord.com/channels/{guildId}/{channelId}/{msgId}` format
-- Hardened pending-check map — timeout eviction + max cap
 - `logDecision()` structured logging helper
 - Context hygiene — bot filter + empty message strip
-- New config: `pendingCheckTimeoutMs`, `maxPendingChecks`, `contextFilterBots`, `modEscalationMinSeverity`
+- New config: `contextFilterBots`, `modEscalationMinSeverity`
 
 ### v0.1.0
 - Real mod auth via Discord API (ModerateMembers/Admin + configurable role/user IDs)
@@ -283,5 +296,7 @@ These are known limitations to revisit after launch with real traffic:
 - [ ] `!banano start` by mod → resumes channel
 - [ ] Rapid negative messages → cooldown suppresses spam
 - [ ] Same message event twice → dedupe prevents double-processing
-- [ ] Raw JSON never appears in any channel
+- [ ] Raw JSON / provider errors never appear in watched chat
+- [ ] Flagged message suppresses normal Banano reply in watched channel
+- [ ] Review failure retries once, then alerts mod channel only
 - [ ] `/vibe_stats` shows correct counts
