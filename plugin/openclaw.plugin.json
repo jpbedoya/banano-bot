@@ -45,14 +45,6 @@
         "type": "number",
         "description": "Window for message deduplication in ms (default: 60000)"
       },
-      "pendingCheckTimeoutMs": {
-        "type": "number",
-        "description": "How long a pending vibe check is valid before being discarded (default: 60000)"
-      },
-      "maxPendingChecks": {
-        "type": "number",
-        "description": "Max concurrent pending vibe checks before oldest are dropped (default: 20)"
-      },
       "contextFilterBots": {
         "type": "boolean",
         "description": "Filter bot messages from AI context window (default: true)"
