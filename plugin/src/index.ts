@@ -693,6 +693,7 @@ const plugin = {
 
       // ── Mod controls ─────────────────────────────────────────────────
       if (content === "!banano stop" || content === "!banano start") {
+        claimChannelReply(discordChannelId, 10_000);
         const authorized = await isModerator(metadata);
         if (!authorized) {
           logDecision(logger, "MOD_DENIED", { user: authorName, channel: discordChannelId });
