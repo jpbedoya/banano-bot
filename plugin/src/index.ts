@@ -336,6 +336,14 @@ function isClaimedChannelReply(channelId: string): boolean {
   return !!expiresAt && expiresAt > Date.now();
 }
 
+function hasAnyClaimedWatchedChannel(watchedChannelIds: string[]): boolean {
+  cleanupExpiringMap(claimedChannelReplies);
+  return watchedChannelIds.some((channelId) => {
+    const expiresAt = claimedChannelReplies.get(channelId);
+    return !!expiresAt && expiresAt > Date.now();
+  });
+}
+
 function allowPluginMessage(channelId: string, content: string, windowMs = 15_000): void {
   cleanupExpiringMap(allowedPluginMessages);
   allowedPluginMessages.set(`${channelId}::${content}`, Date.now() + windowMs);
@@ -616,7 +624,12 @@ const plugin = {
           lastError = `attempt ${attempt}: ${err instanceof Error ? err.message : String(err)}`;
           logger.warn(`[banano-vibe] Vibe review error ${lastError}`);
         } finally {
-          api.runtime.subagent.deleteSession({ sessionKey, deleteTranscript: true }).catch(() => {});
+          try {
+            const cleanup = api.runtime.subagent.deleteSession({ sessionKey, deleteTranscript: true });
+            cleanup?.catch?.(() => {});
+          } catch {
+            // Subagent runtime may be unavailable outside an active gateway request.
+          }
         }
       }
 
@@ -629,13 +642,20 @@ const plugin = {
       const msgCtx = ctx as MessageContext;
       const content = typeof outgoing.content === "string" ? outgoing.content.trim() : "";
       const target = typeof outgoing.to === "string" ? outgoing.to : "";
-      const channelId = extractTrailingId(target) || extractTrailingId(msgCtx.conversationId) || extractTrailingId(msgCtx.channelId);
-      if (!channelId || !config.watchedChannelIds.includes(channelId)) return {};
-      if (consumeAllowedPluginMessage(channelId, content)) return {};
-      if (!isClaimedChannelReply(channelId)) return {};
+      const eventChannel = typeof outgoing.metadata?.channel === "string" ? outgoing.metadata.channel : "";
+      const directChannelId = extractTrailingId(target) || extractTrailingId(msgCtx.conversationId) || extractTrailingId(msgCtx.channelId);
+      const resolvedWatchedChannelId = directChannelId && config.watchedChannelIds.includes(directChannelId) ? directChannelId : null;
+      const fallbackClaimedDiscord =
+        (eventChannel === "discord" || msgCtx.channelId === "discord") && hasAnyClaimedWatchedChannel(config.watchedChannelIds);
+      const suppressionChannelId = resolvedWatchedChannelId || (fallbackClaimedDiscord ? config.watchedChannelIds[0] : null);
+      if (!suppressionChannelId) return {};
+      if (consumeAllowedPluginMessage(suppressionChannelId, content)) return {};
+      if (!isClaimedChannelReply(suppressionChannelId)) return {};
       logDecision(logger, "NORMAL_REPLY_SUPPRESSED", {
-        channel: channelId,
+        channel: suppressionChannelId,
         preview: content.slice(0, 100),
+        target,
+        eventChannel,
       });
       return { cancel: true };
     });
