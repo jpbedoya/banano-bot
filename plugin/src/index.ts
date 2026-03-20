@@ -1,5 +1,5 @@
 /**
- * Banano Vibe Monitor — OpenClaw Plugin v1.1.3
+ * Banano Vibe Monitor — OpenClaw Plugin v1.2.0
  *
  * Two-layer vibe moderation for Discord channels:
  *   Layer 1: Local sentiment scoring (free, instant)
@@ -373,8 +373,6 @@ type Decision =
   | "TURN_CLAIMED"
   | "NORMAL_REPLY_SUPPRESSED"
   | "VIBE_CHECK_START"
-  | "VIBE_CHECK_RETRY"
-  | "VIBE_CHECK_TIMEOUT"
   | "VIBE_CHECK_ERROR"
   | "FALSE_ALARM"
   | "MILD_RESPONSE"
@@ -388,8 +386,6 @@ const LOGGED_DECISIONS = new Set<Decision>([
   "TURN_CLAIMED",
   "NORMAL_REPLY_SUPPRESSED",
   "VIBE_CHECK_START",
-  "VIBE_CHECK_RETRY",
-  "VIBE_CHECK_TIMEOUT",
   "VIBE_CHECK_ERROR",
   "FALSE_ALARM",
   "MILD_RESPONSE",
@@ -441,7 +437,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "1.1.3",
+  version: "1.2.0",
 
   register(api: PluginApi) {
     const config = resolveConfig(api.pluginConfig);
@@ -468,7 +464,7 @@ const plugin = {
     initVibeLog(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v1.1.3 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v1.2.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -490,7 +486,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.1.3**",
+          "🦍 **Banano Vibe Monitor v1.2.0**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -576,69 +572,60 @@ const plugin = {
     }
 
     // ── Isolated AI vibe review ───────────────────────────────────────────
-    // Runs the vibe check in a dedicated isolated session — no re-entrancy,
-    // no message_sending interception. The result comes back directly.
+    // Uses a single persistent reviewer session to avoid spawning new sessions
+    // per check. No retry — if the gateway request context expires mid-wait,
+    // retrying will also fail.
+    const REVIEWER_SESSION_KEY = "banano-vibe:reviewer";
+
     async function runVibeReview(
       prompt: string,
       correlationId: string,
-    ): Promise<{ raw: string | null; error?: string; attempts: number }> {
-      let lastError: string | undefined;
+    ): Promise<{ raw: string | null; error?: string }> {
+      try {
+        const { runId } = await api.runtime.subagent.run({
+          sessionKey: REVIEWER_SESSION_KEY,
+          message: prompt,
+          idempotencyKey: correlationId,
+          deliver: false,
+          ...(config.vibeModel ? { model: config.vibeModel } : {}),
+        });
 
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        const sessionKey = `banano-vibe:check:${correlationId}:${attempt}`;
-        try {
-          const { runId } = await api.runtime.subagent.run({
-            sessionKey,
-            message: prompt,
-            idempotencyKey: `${correlationId}:${attempt}`,
-            deliver: false,
-            ...(config.vibeModel ? { model: config.vibeModel } : {}),
-          });
+        const waited = await api.runtime.subagent.waitForRun({
+          runId,
+          timeoutMs: config.vibeReviewTimeoutMs,
+        });
 
-          const waited = await api.runtime.subagent.waitForRun({
-            runId,
-            timeoutMs: config.vibeReviewTimeoutMs,
-          });
+        if (waited.status !== "ok") {
+          return {
+            raw: null,
+            error: `${waited.status}${waited.error ? ` (${waited.error})` : ""}`,
+          };
+        }
 
-          if (waited.status !== "ok") {
-            lastError = `attempt ${attempt}: ${waited.status}${waited.error ? ` (${waited.error})` : ""}`;
-            logger.warn(`[banano-vibe] Vibe review ${lastError}`);
-            continue;
-          }
+        const { messages } = await api.runtime.subagent.getSessionMessages({
+          sessionKey: REVIEWER_SESSION_KEY,
+          limit: 3,
+        });
 
-          const { messages } = await api.runtime.subagent.getSessionMessages({
-            sessionKey,
-            limit: 5,
-          });
-
-          for (let i = messages.length - 1; i >= 0; i--) {
-            const m = messages[i] as { role?: string; content?: unknown };
-            if (m.role !== "assistant") continue;
-            const content = m.content;
-            if (typeof content === "string" && content.trim()) return { raw: content, attempts: attempt };
-            if (Array.isArray(content)) {
-              for (const block of content) {
-                const b = block as { type?: string; text?: string };
-                if (b.type === "text" && b.text?.trim()) return { raw: b.text, attempts: attempt };
-              }
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const m = messages[i] as { role?: string; content?: unknown };
+          if (m.role !== "assistant") continue;
+          const content = m.content;
+          if (typeof content === "string" && content.trim()) return { raw: content };
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              const b = block as { type?: string; text?: string };
+              if (b.type === "text" && b.text?.trim()) return { raw: b.text };
             }
           }
-
-          lastError = `attempt ${attempt}: empty assistant response`;
-        } catch (err) {
-          lastError = `attempt ${attempt}: ${err instanceof Error ? err.message : String(err)}`;
-          logger.warn(`[banano-vibe] Vibe review error ${lastError}`);
-        } finally {
-          try {
-            const cleanup = api.runtime.subagent.deleteSession({ sessionKey, deleteTranscript: true });
-            cleanup?.catch?.(() => {});
-          } catch {
-            // Subagent runtime may be unavailable outside an active gateway request.
-          }
         }
-      }
 
-      return { raw: null, error: lastError, attempts: 2 };
+        return { raw: null, error: "empty assistant response" };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`[banano-vibe] Vibe review error: ${msg}`);
+        return { raw: null, error: msg };
+      }
     }
 
     // ── message_sending hook ────────────────────────────────────────────
@@ -785,16 +772,6 @@ const plugin = {
       });
 
       const review = await runVibeReview(vibePrompt, correlationId);
-      if (review.attempts > 1) {
-        logDecision(logger, "VIBE_CHECK_RETRY", {
-          correlationId,
-          channel: discordChannelId,
-          author: authorName,
-          authorId,
-          attempts: review.attempts,
-          error: review.error,
-        });
-      }
 
       if (!review.raw) {
         stats.reviewErrors++;
@@ -812,7 +789,7 @@ const plugin = {
               ? `https://discord.com/channels/${guildId}/${discordChannelId}/${messageId}`
               : null;
           const alert = [
-            `⚠️ **Vibe review failed twice** in <#${discordChannelId}>`,
+            `⚠️ **Vibe review failed** in <#${discordChannelId}>`,
             `**User:** ${authorName}${authorId ? ` (<@${authorId}>)` : ""}`,
             `**User ID:** ${authorId ?? "unknown"}`,
             `**Message:** "${content.slice(0, 200)}"`,

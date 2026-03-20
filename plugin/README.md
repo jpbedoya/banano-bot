@@ -1,4 +1,4 @@
-# Banano Vibe Monitor — OpenClaw Plugin
+# Banano Vibe Monitor — OpenClaw Plugin v1.2.0
 
 Two-layer vibe moderation for Discord channels, running natively inside OpenClaw.
 
@@ -129,8 +129,7 @@ For a stricter moderation community, set `highSeverityPublicReply: false` to esc
 
 - **Mod auth:** `!banano stop/start` verifies Discord permissions (ModerateMembers or Administrator). Configure `modRoleIds`/`modUserIds` for explicit control — don't rely on permission fallback alone in production.
 - **Claimed turns:** once a watched-channel message trips moderation, Banano claims that turn and suppresses normal assistant replies in that channel for the moderation window.
-- **Retry once on model failure:** AI review is retried silently one time before being treated as failed.
-- **No raw provider errors in watched chat:** if both review attempts fail, Banano logs the failure and alerts the mod channel only.
+- **No raw provider errors in watched chat:** if the review fails, Banano logs the failure and alerts the mod channel only — never exposes errors in the watched channel.
 - **Context-aware:** AI review includes last ~10 messages, preventing false flags on sarcasm/banter.
 - **Fails closed:** if permission check fails, mod commands are denied.
 
@@ -216,7 +215,7 @@ jq 'select(.decision=="HIGH_ESCALATION")' $LOGDIR/banano-vibe-$DATE.jsonl
 jq -r '.decision' $LOGDIR/banano-vibe-$DATE.jsonl | sort | uniq -c | sort -rn
 ```
 
-Decisions in the file: `SENTIMENT_FLAG`, `TURN_CLAIMED`, `NORMAL_REPLY_SUPPRESSED`, `VIBE_CHECK_START`, `VIBE_CHECK_RETRY`, `VIBE_CHECK_ERROR`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
+Decisions in the file: `SENTIMENT_FLAG`, `TURN_CLAIMED`, `NORMAL_REPLY_SUPPRESSED`, `VIBE_CHECK_START`, `VIBE_CHECK_ERROR`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
 
 All decisions (including pass-throughs) are also in the main OpenClaw gateway log:
 ```bash
@@ -243,6 +242,11 @@ These are known limitations to revisit after launch with real traffic:
 - **Suppression scope** — turn-claim suppression is channel-scoped and time-window based; if you want even tighter ownership, move moderation to a dedicated bot/session surface
 
 ## Changelog
+
+### v1.2.0
+- **Persistent reviewer session** — vibe checks now reuse a single long-lived session (`banano-vibe:reviewer`) instead of spawning a new one per message. Eliminates session sprawl and cleans up orphaned subagents.
+- **Removed retry loop** — the previous retry-on-timeout logic would attempt a second subagent run after the gateway request context had already expired, causing `Plugin runtime subagent methods are only available during a gateway request` errors. Removed the retry; a single well-scoped run is reliable; failures are still alerted to the mod channel.
+- Mod channel failure alert now says "Vibe review failed" (singular) instead of "failed twice"
 
 ### v1.1.3
 - Added `vibeModel` config option — override the AI model used for vibe review (defaults to OpenClaw primary)
@@ -310,5 +314,5 @@ These are known limitations to revisit after launch with real traffic:
 - [ ] Same message event twice → dedupe prevents double-processing
 - [ ] Raw JSON / provider errors never appear in watched chat
 - [ ] Flagged message suppresses normal Banano reply in watched channel
-- [ ] Review failure retries once, then alerts mod channel only
+- [ ] Review failure alerts mod channel only (no error in watched channel)
 - [ ] `/vibe_stats` shows correct counts
