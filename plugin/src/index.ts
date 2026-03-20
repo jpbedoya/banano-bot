@@ -1,5 +1,5 @@
 /**
- * Banano Vibe Monitor — OpenClaw Plugin v1.3.0
+ * Banano Vibe Monitor — OpenClaw Plugin v1.4.0
  *
  * Two-layer vibe moderation for Discord channels:
  *   Layer 1: Local sentiment scoring (free, instant)
@@ -16,6 +16,13 @@ import { shouldEscalate, getSentimentScore } from "./sentiment.js";
 import { buildVibeCheckPrompt, parseVibeResult } from "./vibe-check.js";
 import type { RecentMessage } from "./vibe-check.js";
 import { initState, isSilenced, silence, unsilence } from "./state.js";
+import {
+  initViolations,
+  recordViolation,
+  getMember,
+  getRecentViolations,
+  formatMemberViolations,
+} from "./violations.js";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
@@ -149,20 +156,54 @@ function resolveDiscordToken(config: OpenClawConfig): string | null {
   return null;
 }
 
-// ── Anthropic API key from config ─────────────────────────────────────────────
+// ── API key resolution ───────────────────────────────────────────────────────
+// openclaw.json only stores profile metadata (name, provider, mode) — the
+// actual token lives in ~/.openclaw/agents/main/agent/auth-profiles.json.
+
+function resolveAuthProfiles(): Record<string, Record<string, unknown>> {
+  try {
+    const home = process.env.HOME || "/root";
+    const authPath = path.join(home, ".openclaw", "agents", "main", "agent", "auth-profiles.json");
+    if (fs.existsSync(authPath)) {
+      const data = JSON.parse(fs.readFileSync(authPath, "utf8"));
+      return (data?.profiles as Record<string, Record<string, unknown>>) ?? {};
+    }
+  } catch { /* */ }
+  return {};
+}
 
 function resolveAnthropicKey(config: OpenClawConfig): string | null {
+  // 1. Try openclaw.json auth.profiles (rarely has the raw token, but try)
   try {
     const auth = config.auth as Record<string, unknown> | undefined;
-    if (!auth) return null;
-    const profiles = auth.profiles as Record<string, Record<string, unknown>> | undefined;
-    if (!profiles) return null;
-    for (const profile of Object.values(profiles)) {
-      if (profile.provider === "anthropic" && typeof profile.token === "string") {
-        return profile.token;
+    const profiles = auth?.profiles as Record<string, Record<string, unknown>> | undefined;
+    if (profiles) {
+      for (const profile of Object.values(profiles)) {
+        if (profile.provider === "anthropic" && typeof profile.token === "string") {
+          return profile.token;
+        }
       }
     }
   } catch { /* */ }
+
+  // 2. Read from the auth-profiles store on disk
+  for (const profile of Object.values(resolveAuthProfiles())) {
+    if (profile.provider === "anthropic") {
+      if (typeof profile.token === "string") return profile.token;
+      if (typeof profile.key === "string") return profile.key;
+    }
+  }
+
+  return null;
+}
+
+function resolveOpenRouterKey(_config: OpenClawConfig): string | null {
+  for (const profile of Object.values(resolveAuthProfiles())) {
+    if (profile.provider === "openrouter") {
+      if (typeof profile.key === "string") return profile.key;
+      if (typeof profile.token === "string") return profile.token;
+    }
+  }
   return null;
 }
 
@@ -432,7 +473,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "1.3.0",
+  version: "1.4.0",
 
   register(api: PluginApi) {
     const config = resolveConfig(api.pluginConfig);
@@ -457,9 +498,10 @@ const plugin = {
     const stateDir = api.resolvePath(".");
     initState(stateDir);
     initVibeLog(stateDir);
+    initViolations(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v1.3.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v1.4.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -481,7 +523,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.3.0**",
+          "🦍 **Banano Vibe Monitor v1.4.0**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -515,6 +557,28 @@ const plugin = {
             `Dedupe suppressed: ${stats.dedupeSuppressed}`,
           ].join("\n"),
         };
+      },
+    });
+
+    // ── /vibe_violations command ─────────────────────────────────────────
+    api.registerCommand({
+      name: "vibe_violations",
+      description: "Show violation history. Usage: /vibe_violations [userId]",
+      acceptsArgs: true,
+      handler: ({ args }) => {
+        const userId = args?.trim().replace(/^<@!?/, "").replace(/>$/, "");
+        if (userId) {
+          const member = getMember(userId);
+          if (!member) return { text: `No violations on record for <@${userId}>.` };
+          return { text: formatMemberViolations(member) };
+        }
+        const recent = getRecentViolations(30);
+        if (recent.length === 0) return { text: "No violations in the last 30 days." };
+        const lines = ["**Recent violations (last 30 days):**"];
+        for (const m of recent.slice(0, 10)) {
+          lines.push(`• **${m.username}** — ${m.strikes} strike${m.strikes !== 1 ? "s" : ""} | last: ${m.latestViolation.date} | ${m.latestViolation.severity}`);
+        }
+        return { text: lines.join("\n") };
       },
     });
 
@@ -566,56 +630,93 @@ const plugin = {
       return false;
     }
 
-    // ── Direct Anthropic API vibe review ─────────────────────────────────
-    // Calls the Anthropic messages API directly — no gateway request context
-    // needed, no subagent session lifecycle to manage.
-    const anthropicKey = resolveAnthropicKey(api.config);
-    if (!anthropicKey) {
-      logger.error("[banano-vibe] No Anthropic API key in config — vibe review will not work");
-    }
-
-    const ANTHROPIC_API = "https://api.anthropic.com/v1/messages";
+    // ── Vibe review — multi-provider ─────────────────────────────────────
+    // Routes to Anthropic or OpenRouter based on the vibeModel prefix.
     const DEFAULT_VIBE_MODEL = "anthropic/claude-haiku-4-5";
 
-    function resolveApiModel(vibeModel: string | null): string {
-      // Strip "anthropic/" prefix if present — the API uses bare model names
-      const m = vibeModel || DEFAULT_VIBE_MODEL;
-      return m.replace(/^anthropic\//, "");
+    function isOpenRouterModel(m: string): boolean {
+      return m.startsWith("openrouter/");
     }
 
     async function runVibeReview(
       prompt: string,
     ): Promise<{ raw: string | null; error?: string }> {
-      if (!anthropicKey) return { raw: null, error: "No Anthropic API key configured" };
+      const vibeModel = config.vibeModel || DEFAULT_VIBE_MODEL;
+
       try {
-        const model = resolveApiModel(config.vibeModel);
-        const res = await fetch(ANTHROPIC_API, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": anthropicKey,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify({
-            model,
-            max_tokens: 256,
-            messages: [{ role: "user", content: prompt }],
-          }),
-          signal: AbortSignal.timeout(config.vibeReviewTimeoutMs),
-        });
+        if (isOpenRouterModel(vibeModel)) {
+          // ── OpenRouter path ─────────────────────────────────────────────
+          const orKey = resolveOpenRouterKey(api.config);
+          if (!orKey) return { raw: null, error: "No OpenRouter API key configured" };
 
-        if (!res.ok) {
-          const body = await res.text().catch(() => "");
-          return { raw: null, error: `Anthropic API ${res.status}: ${body.slice(0, 200)}` };
+          // Strip "openrouter/" prefix — OR uses bare provider/model IDs
+          const model = vibeModel.replace(/^openrouter\//, "");
+
+          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${orKey}`,
+              "HTTP-Referer": "https://monkedao.io",
+              "X-Title": "Banano Vibe Monitor",
+            },
+            body: JSON.stringify({
+              model,
+              max_tokens: 256,
+              messages: [{ role: "user", content: prompt }],
+            }),
+            signal: AbortSignal.timeout(config.vibeReviewTimeoutMs),
+          });
+
+          if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            return { raw: null, error: `OpenRouter API ${res.status}: ${body.slice(0, 200)}` };
+          }
+
+          const data = await res.json() as {
+            choices?: Array<{ message?: { content?: string } }>;
+          };
+
+          const text = data.choices?.[0]?.message?.content?.trim();
+          if (!text) return { raw: null, error: "empty response from OpenRouter" };
+          return { raw: text };
+
+        } else {
+          // ── Anthropic path ──────────────────────────────────────────────
+          const anthropicKey = resolveAnthropicKey(api.config);
+          if (!anthropicKey) return { raw: null, error: "No Anthropic API key configured" };
+
+          // Strip "anthropic/" prefix — the Anthropic API uses bare model names
+          const model = vibeModel.replace(/^anthropic\//, "");
+
+          const res = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": anthropicKey,
+              "anthropic-version": "2023-06-01",
+            },
+            body: JSON.stringify({
+              model,
+              max_tokens: 256,
+              messages: [{ role: "user", content: prompt }],
+            }),
+            signal: AbortSignal.timeout(config.vibeReviewTimeoutMs),
+          });
+
+          if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            return { raw: null, error: `Anthropic API ${res.status}: ${body.slice(0, 200)}` };
+          }
+
+          const data = await res.json() as {
+            content?: Array<{ type: string; text?: string }>;
+          };
+
+          const text = data.content?.find((b) => b.type === "text")?.text?.trim();
+          if (!text) return { raw: null, error: "empty response from Anthropic" };
+          return { raw: text };
         }
-
-        const data = await res.json() as {
-          content?: Array<{ type: string; text?: string }>;
-        };
-
-        const text = data.content?.find((b) => b.type === "text")?.text?.trim();
-        if (!text) return { raw: null, error: "empty response from API" };
-        return { raw: text };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn(`[banano-vibe] Vibe review error: ${msg}`);
@@ -862,8 +963,24 @@ const plugin = {
             ? `https://discord.com/channels/${guildId}/${discordChannelId}/${messageId}`
             : null;
 
+        // Record in violation ledger
+        let memberRecord = null;
+        if (authorId) {
+          memberRecord = recordViolation({
+            userId: authorId,
+            username: authorName,
+            reason: result.reason,
+            severity: result.severity,
+            channelId: discordChannelId,
+            messageId,
+            guildId,
+          });
+        }
+
+        const strikeText = memberRecord ? ` (Strike #${memberRecord.strikes})` : "";
+
         const alert = [
-          `🚨 **Vibe alert** in <#${discordChannelId}>`,
+          `🚨 **Vibe alert** in <#${discordChannelId}>${strikeText}`,
           `**User:** ${authorName}${authorId ? ` (<@${authorId}>)` : ""}`,
           `**User ID:** ${authorId ?? "unknown"}`,
           `**Message:** "${content.slice(0, 200)}"`,

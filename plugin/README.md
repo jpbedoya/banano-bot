@@ -1,4 +1,4 @@
-# Banano Vibe Monitor — OpenClaw Plugin v1.3.0
+# Banano Vibe Monitor — OpenClaw Plugin v1.4.0
 
 Two-layer vibe moderation for Discord channels, running natively inside OpenClaw.
 
@@ -10,11 +10,20 @@ git clone https://github.com/jpbedoya/banano-bot
 cd banano-bot/plugin
 npm install && npm run build
 
-# 2. Copy-install into OpenClaw (isolated from dev code)
-openclaw plugins install .
+# 2. Copy-install into OpenClaw
+cp dist/index.js ~/.openclaw/extensions/banano-vibe/dist/index.js
 ```
 
-This copies the plugin into OpenClaw's extensions directory (`~/.openclaw/extensions/banano-vibe/`). Logs, state, and config are all stored there — separate from your dev folder.
+> **Note:** `openclaw plugins install .` will fail if the plugin already exists. After first install, just copy the built `dist/index.js` directly and restart the gateway.
+
+### First install (clean slate)
+
+```bash
+cd banano-bot/plugin
+npm install && npm run build
+openclaw plugins install .
+openclaw gateway restart
+```
 
 ### Updating to a new version
 
@@ -22,17 +31,19 @@ This copies the plugin into OpenClaw's extensions directory (`~/.openclaw/extens
 cd banano-bot/plugin
 git pull
 npm run build
-openclaw plugins install .   # re-copies, overwrites the installed version
+cp dist/index.js ~/.openclaw/extensions/banano-vibe/dist/index.js
 openclaw gateway restart
 ```
 
-Prod only updates when you explicitly run these steps. A `git pull` in your dev folder has no effect until you reinstall.
+> **Important:** `openclaw plugins install` blocks if the plugin directory already exists. Always use the `cp` approach for updates — no need to uninstall first.
 
-> **Note:** Do not use `openclaw plugins install -l .` (the `-l` / link flag). That loads directly from your dev folder and any file change takes effect on next restart — not safe for production.
+> **Do not** use `openclaw plugins install -l .` (the `-l` / link flag). That loads directly from your dev folder and any file change takes effect on next restart — not safe for production.
+
+---
 
 ## Configure
 
-Add to your OpenClaw config (`openclaw.json`):
+Add to your OpenClaw config (`openclaw.json`) via `openclaw config edit` or the gateway `config.patch` API:
 
 ```yaml
 plugins:
@@ -57,12 +68,14 @@ plugins:
 
         # Sentiment gate threshold (default: -2).
         # Lower = less sensitive. Start here, tune after a few days of real traffic.
-        # Watch logs for false alarms and missed flags; -1 is more responsive.
         sentimentThreshold: -2
 
         # Escalation policy
         modEscalationMinSeverity: high   # low | medium | high (default: high)
         highSeverityPublicReply: true    # false = silent mod-only escalation for high severity
+
+        # AI model for vibe review (optional — see Model Selection below)
+        vibeModel: "openrouter/nvidia/nemotron-3-nano-30b-a3b:free"
 
         # Tuning knobs (defaults are fine for launch)
         cooldownMs: 30000          # min time between actions per channel
@@ -86,6 +99,50 @@ channels:
 
 Then restart OpenClaw.
 
+---
+
+## Model Selection
+
+The `vibeModel` config controls which AI model runs the vibe review. The plugin auto-detects the provider from the model ID prefix and routes to the correct API with the correct key.
+
+### Supported providers
+
+| Prefix | API | Key source |
+|--------|-----|------------|
+| `openrouter/...` | `openrouter.ai/api/v1/chat/completions` | `openrouter` profile in `auth-profiles.json` |
+| `anthropic/...` | `api.anthropic.com/v1/messages` | `anthropic` profile in `auth-profiles.json` |
+
+### Examples
+
+```yaml
+# OpenRouter (free tier Nemotron Nano — fast, cheap, good enough for moderation)
+vibeModel: "openrouter/nvidia/nemotron-3-nano-30b-a3b:free"
+
+# Anthropic Haiku (fast, low cost, high quality)
+vibeModel: "anthropic/claude-haiku-4-5"
+
+# OpenRouter auto-router (lets OpenRouter pick the best available)
+vibeModel: "openrouter/openrouter/auto"
+```
+
+> **Critical:** The `openrouter/` prefix tells the plugin to call OpenRouter's API using the OpenRouter key. Without the prefix, an Anthropic model name sent to the Anthropic API. If you set `vibeModel` to an OpenRouter model ID without the prefix, it will fail with a 404 from the Anthropic API. Always match the prefix to the provider.
+
+### Key storage
+
+Keys are read automatically from `~/.openclaw/agents/main/agent/auth-profiles.json`. OpenClaw populates this file when you configure providers via `openclaw configure`. You do not need to add keys manually.
+
+To verify your keys are present:
+```bash
+cat ~/.openclaw/agents/main/agent/auth-profiles.json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for k, v in data.get('profiles', {}).items():
+    print(k, '->', v.get('provider'), '| has key:', 'key' in v or 'token' in v)
+"
+```
+
+---
+
 ## How it works
 
 ```
@@ -107,8 +164,7 @@ Layer 1: Sentiment score (free, local)
                                             ├── mild → in-channel redirect
                                             ├── high → mod escalation
                                             │            + public reply (if highSeverityPublicReply)
-                                            └── review failure → retry once silently,
-                                                         then mod-only failure alert
+                                            └── review failure → mod-only failure alert
 ```
 
 ### Escalation policy
@@ -127,9 +183,9 @@ For a stricter moderation community, set `highSeverityPublicReply: false` to esc
 
 ### Security / safety behavior
 
-- **Mod auth:** `!banano stop/start` verifies Discord permissions (ModerateMembers or Administrator). Configure `modRoleIds`/`modUserIds` for explicit control — don't rely on permission fallback alone in production.
+- **Mod auth:** `!banano stop/start` verifies Discord permissions (ModerateMembers or Administrator). Configure `modRoleIds`/`modUserIds` for explicit control.
 - **Claimed turns:** once a watched-channel message trips moderation, Banano claims that turn and suppresses normal assistant replies in that channel for the moderation window.
-- **No raw provider errors in watched chat:** if the review fails, Banano logs the failure and alerts the mod channel only — never exposes errors in the watched channel.
+- **No raw provider errors in watched chat:** if the review fails, Banano logs the failure and alerts the mod channel only.
 - **Context-aware:** AI review includes last ~10 messages, preventing false flags on sarcasm/banter.
 - **Fails closed:** if permission check fails, mod commands are denied.
 
@@ -141,88 +197,61 @@ For a stricter moderation community, set `highSeverityPublicReply: false` to esc
 
 ### Commands
 
-- `/vibe_status` — show current config and pending check count
+- `/vibe_status` — show current config, model, thresholds
 - `/vibe_stats` — show counters since last restart (flags, false alarms, escalations, cooldowns)
+- `/vibe_violations [user]` — show violation history for a user or recent violations (last 30 days)
+
+---
+
+## Violation Ledger
+
+The plugin tracks formal moderation warnings in a persistent ledger at:
+```
+~/.openclaw/extensions/banano-vibe/moderation/violations.json
+```
+
+Violations are recorded automatically when the AI review escalates a message. You can also record manual warnings by issuing them through the Banano agent.
+
+The three-strike policy applies:
+- Strike 1: 1-hour timeout
+- Strike 2: 24-hour timeout
+- Strike 3: 7-day timeout
+
+> **Note:** Banano records violations but cannot apply Discord timeouts directly (requires `MODERATE_MEMBERS` Discord permission on the bot token). Timeouts must be applied manually in Discord. This is a known limitation to close in a future release.
+
+Use `/vibe_violations` to query the ledger, or `/vibe_violations @user` for a specific user.
+
+---
 
 ## Observability
 
-### Dedicated JSONL log
+### Main OpenClaw log
 
-After a copied install (`npm run deploy`), logs live at:
-```
-~/.openclaw/extensions/banano-vibe/logs/banano-vibe-YYYY-MM-DD.jsonl
-```
-
-One JSON object per line, daily rotation by UTC date. Only actionable decisions are written — noisy pass-throughs (`SENTIMENT_PASS`, `NOT_WATCHED`) are skipped.
-
-Example entries:
-```jsonl
-{"ts":"2026-03-17T18:34:00.000Z","decision":"SENTIMENT_FLAG","channel":"123...","score":-3,"preview":"this project is trash","author":"user123","authorId":"4280..."}
-{"ts":"2026-03-17T18:34:00.100Z","decision":"TURN_CLAIMED","channel":"123...","messageId":"1483...","author":"user123","authorId":"4280..."}
-{"ts":"2026-03-17T18:34:02.000Z","decision":"FALSE_ALARM","channel":"123...","reason":"sarcastic banter","correlationId":"..."}
-{"ts":"2026-03-17T18:35:10.000Z","decision":"HIGH_ESCALATION","channel":"123...","severity":"high","reason":"personal attack","author":"user123","authorId":"4280...","hasJumpLink":true}
-```
-
-**Tail live:**
+All decisions flow to the main OpenClaw gateway log:
 ```bash
-LOGDIR=~/.openclaw/extensions/banano-vibe/logs
-tail -f $LOGDIR/banano-vibe-$(date -u +%Y-%m-%d).jsonl | jq .
+grep "banano-vibe" /tmp/openclaw/openclaw-$(date -u +%Y-%m-%d).log | jq .
 ```
 
-### CLI summary script
-
-Run from the dev folder (`~/banano-bot/plugin`):
-
-```bash
-# Today's summary (reads from installed extension logs)
-LOGS_DIR=~/.openclaw/extensions/banano-vibe/logs npm run logs
-
-# Specific date
-node scripts/logs-summary.mjs 2026-03-17
-
-# All dates
-npm run logs:all
-
-# Last N recent events
-node scripts/logs-summary.mjs --recent 20
-```
-
-Output includes:
-- Total flags, false alarms, escalations, mild responses
-- False alarm rate (%)
-- Top channels by event count
-- Recent events timeline
-
-### Static HTML viewer
-
-Open `scripts/logs-viewer.html` in any browser — no server needed.
-
-Drop a `banano-vibe-YYYY-MM-DD.jsonl` file from `~/.openclaw/extensions/banano-vibe/logs/` onto it to get:
-- Summary cards (flags / false alarms / mild / escalations)
-- Top channels bar chart
-- Filterable, searchable event table
+**Decisions logged:** `SENTIMENT_FLAG`, `SENTIMENT_PASS`, `TURN_CLAIMED`, `VIBE_CHECK_START`, `VIBE_CHECK_ERROR`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`, `NOT_WATCHED`
 
 ### jq queries
 
 ```bash
-LOGDIR=~/.openclaw/extensions/banano-vibe/logs
-DATE=$(date -u +%Y-%m-%d)
+LOG=/tmp/openclaw/openclaw-$(date -u +%Y-%m-%d).log
 
-# All escalations
-jq 'select(.decision=="HIGH_ESCALATION")' $LOGDIR/banano-vibe-$DATE.jsonl
+# All vibe decisions
+grep "banano-vibe" $LOG | jq '."1"' | grep -v null
+
+# Only escalations
+grep "HIGH_ESCALATION" $LOG | jq .
 
 # Count by decision type
-jq -r '.decision' $LOGDIR/banano-vibe-$DATE.jsonl | sort | uniq -c | sort -rn
-```
-
-Decisions in the file: `SENTIMENT_FLAG`, `TURN_CLAIMED`, `NORMAL_REPLY_SUPPRESSED`, `VIBE_CHECK_START`, `VIBE_CHECK_ERROR`, `FALSE_ALARM`, `MILD_RESPONSE`, `HIGH_ESCALATION`, `MOD_DENIED`, `MOD_SILENCED`, `MOD_UNSILENCED`, `COOLDOWN`, `DEDUPE`
-
-All decisions (including pass-throughs) are also in the main OpenClaw gateway log:
-```bash
-grep "banano-vibe" ~/.openclaw/logs/gateway.log
+grep "banano-vibe" $LOG | jq -r '."1" | split(" ")[1]' | sort | uniq -c | sort -rn
 ```
 
 Use `/vibe_stats` for a quick in-chat summary without touching the filesystem.
+
+---
 
 ## Tuning guide
 
@@ -233,91 +262,112 @@ Use `/vibe_stats` for a quick in-chat summary without touching the filesystem.
 3. Check `HIGH_ESCALATION` logs. Too many mod alerts → raise `modEscalationMinSeverity` to `high`.
 4. Check `SENTIMENT_PASS` entries for messages that should have been caught → raise threshold.
 
+---
+
+## Troubleshooting
+
+### `Anthropic API 404: model not found`
+You set `vibeModel` to an OpenRouter model ID but it's being sent to the Anthropic API. Make sure the model ID starts with `openrouter/`. Example: `openrouter/nvidia/nemotron-3-nano-30b-a3b:free`.
+
+### `/vibe_violations` shows 0 violations
+The violation ledger only records violations that were escalated automatically by the AI review, or manually via the agent. Warnings you send as plain Discord messages are not auto-detected. To record a manual warning, ask the Banano agent to issue a formal warning — it will write to the ledger.
+
+### Plugin update not taking effect after restart
+SIGUSR1 (gateway tool restart) does a config reload but reuses the cached Node module. If you updated `dist/index.js`, you need a full process restart to bust the module cache:
+```bash
+openclaw gateway restart
+```
+Or kill and restart the gateway process directly via your process manager.
+
+### Plugin won't reinstall (`plugin already exists`)
+`openclaw plugins install` blocks if `~/.openclaw/extensions/banano-vibe/` already exists. For updates, just copy the built file directly:
+```bash
+cp dist/index.js ~/.openclaw/extensions/banano-vibe/dist/index.js
+openclaw gateway restart
+```
+
+---
+
 ## What's not in scope yet
 
-These are known limitations to revisit after launch with real traffic:
+- **Applying Discord timeouts automatically** — requires `MODERATE_MEMBERS` permission on bot token; currently manual
+- **Per-user cooldown** — repeated offender auto-escalation
+- **Violation ledger auto-populated from manual warnings** — currently only auto-escalations are recorded
 
-- **Per-user cooldown** — repeated offender tracking, anti-pile-on behavior
-- **Context quality** — trim repetitive spam, skip very short noise
-- **Suppression scope** — turn-claim suppression is channel-scoped and time-window based; if you want even tighter ownership, move moderation to a dedicated bot/session surface
+---
 
 ## Changelog
 
+### v1.4.0
+- **Multi-provider vibe review** — plugin now routes to the correct API based on the `vibeModel` prefix:
+  - `openrouter/*` → OpenRouter API (`openrouter.ai/api/v1/chat/completions`) with OpenRouter key
+  - `anthropic/*` → Anthropic API (`api.anthropic.com/v1/messages`) with Anthropic key
+  - Previously hard-coded to Anthropic only — any OpenRouter model would 404
+- **New `resolveOpenRouterKey()`** — reads OpenRouter key from `auth-profiles.json` automatically
+- **Violation ledger** — `/vibe_violations` command + persistent `violations.json` tracking strikes, reasons, dates
+- Default `vibeModel` changed to `openrouter/nvidia/nemotron-3-nano-30b-a3b:free` (fast, free, sufficient for moderation)
+
 ### v1.3.0
-- **Direct Anthropic API for vibe review** — replaced subagent session approach with a direct `fetch` to the Anthropic messages API. Eliminates the `Plugin runtime subagent methods are only available during a gateway request` crash entirely. No session lifecycle, no context expiry, no retry needed.
-- Removed all subagent runtime types and the persistent reviewer session key
-- `vibeModel` config now strips the `anthropic/` prefix automatically for the API call (default: `claude-haiku-4-5`)
+- **Direct Anthropic API for vibe review** — replaced subagent session approach with a direct `fetch` to the Anthropic messages API. Eliminates the `Plugin runtime subagent methods are only available during a gateway request` crash entirely.
+- `vibeModel` config strips the `anthropic/` prefix automatically for the API call (default: `claude-haiku-4-5`)
 
 ### v1.2.0
-- **Persistent reviewer session** — vibe checks now reuse a single long-lived session (`banano-vibe:reviewer`) instead of spawning a new one per message. Eliminates session sprawl and cleans up orphaned subagents.
-- **Removed retry loop** — the previous retry-on-timeout logic would attempt a second subagent run after the gateway request context had already expired, causing `Plugin runtime subagent methods are only available during a gateway request` errors. Removed the retry; a single well-scoped run is reliable; failures are still alerted to the mod channel.
-- Mod channel failure alert now says "Vibe review failed" (singular) instead of "failed twice"
+- **Persistent reviewer session** — vibe checks reuse a single long-lived session instead of spawning a new one per message
+- **Removed retry loop** — the previous retry-on-timeout logic caused errors after the gateway request context expired; removed
 
 ### v1.1.3
-- Added `vibeModel` config option — override the AI model used for vibe review (defaults to OpenClaw primary)
-- Hardened Discord suppression fallback for edge cases in message routing
-- Fixed subagent session cleanup to avoid leaking sessions on timeout
-- Fixed `!banano stop/start` to claim channel reply and suppress main agent leakthrough
+- Added `vibeModel` config option
+- Hardened Discord suppression fallback
+- Fixed subagent session cleanup
+- Fixed `!banano stop/start` to claim channel reply properly
 
 ### v1.1.2
-- Fixed claim window behavior: window now releases cleanly on false alarm
-- Fixed false alarm path: channel reply claim is freed so normal replies can resume
-- Fixed jump link: guarded against missing `guildId`/`messageId` to prevent broken links
-- Tightened dedupe: sentiment check now happens after dedupe to avoid double-counting
+- Fixed claim window release on false alarm
+- Fixed jump link guarding against missing `guildId`/`messageId`
+- Tightened dedupe to prevent double-counting
 
 ### v1.1.1
-- Fixed isolated review runtime call to include `idempotencyKey`
-- Fixed Discord send path to use OpenClaw's native `sendMessageDiscord(target, text, opts)` signature
-- Fixed Discord author attribution using `senderName` / `senderUsername`
-- Added `authorId` to logs and mod escalations for reliable later moderation actions
-- Claimed-turn suppression: when moderation triggers, Banano suppresses normal watched-channel replies for that turn
-- Retry-once moderation review failure handling, with second failure logged and sent to mod channel only
-- Removed stale config docs for `pendingCheckTimeoutMs` / `maxPendingChecks`
+- Fixed isolated review runtime call
+- Fixed Discord send path signature
+- Fixed Discord author attribution
+- Added `authorId` to logs and escalations
+- Claimed-turn suppression implemented
+- Retry-once failure handling with mod-channel-only alert on second failure
 
 ### v1.0.0
-- CLI summary script: `npm run logs` — flags, false alarms, escalations, top channels, recent events
-- Static HTML viewer: `scripts/logs-viewer.html` — drag-and-drop JSONL, filter/search, charts
+- CLI summary script: `npm run logs`
+- Static HTML viewer: `scripts/logs-viewer.html`
 
 ### v0.4.0
-- Dedicated JSONL log: `plugin/logs/banano-vibe-YYYY-MM-DD.jsonl` (daily rotation, UTC)
-- Only actionable decisions written (not noisy pass-throughs)
-- Best-effort write — plugin won't crash if log dir is unwritable
+- Dedicated JSONL log with daily rotation
 
 ### v0.3.0
-- `/vibe_stats` command — flag, false alarm, escalation, cooldown counters
-- `highSeverityPublicReply` config — explicit control over whether high-severity also replies publicly
-- Stats counters wired to all decision paths
-- Silent escalation note in mod alert when `highSeverityPublicReply: false`
+- `/vibe_stats` command
+- `highSeverityPublicReply` config
 
 ### v0.2.0
-- Correlation IDs — UUID per check, exact-match interception
-- Jump links — correct `discord.com/channels/{guildId}/{channelId}/{msgId}` format
-- `logDecision()` structured logging helper
-- Context hygiene — bot filter + empty message strip
-- New config: `contextFilterBots`, `modEscalationMinSeverity`
+- Correlation IDs, jump links, structured logging, context hygiene
 
 ### v0.1.0
-- Real mod auth via Discord API (ModerateMembers/Admin + configurable role/user IDs)
-- Recent message context fetch for AI review
-- Tagged vibe check responses (VIBE_TAG) — JSON never leaks to chat
-- Session routing via conversation-based key
-- Dedupe by message ID + per-channel cooldown
-- Rich mod escalation (user, message, severity, reason)
+- Initial release: sentiment gate, AI review, mod auth, escalation
+
+---
 
 ## Test checklist
 
 - [ ] `@Banano gm` → normal reply (bypasses plugin)
-- [ ] Positive message in watched channel → `SENTIMENT_PASS` in logs
+- [ ] Positive message in watched channel → `SENTIMENT_PASS` in logs, no action
 - [ ] Negative message → sentiment gate trips → AI review fires
 - [ ] Mild issue → gentle in-channel redirect
 - [ ] Serious issue → mod channel escalation with jump link
 - [ ] `highSeverityPublicReply: false` → high severity escalates silently
-- [ ] `!banano stop` by mod → silences channel, persists on restart
+- [ ] `!banano stop` by mod → silences channel
 - [ ] `!banano stop` by non-mod → `MOD_DENIED` in logs, no action
 - [ ] `!banano start` by mod → resumes channel
 - [ ] Rapid negative messages → cooldown suppresses spam
 - [ ] Same message event twice → dedupe prevents double-processing
 - [ ] Raw JSON / provider errors never appear in watched chat
-- [ ] Flagged message suppresses normal Banano reply in watched channel
-- [ ] Review failure alerts mod channel only (no error in watched channel)
 - [ ] `/vibe_stats` shows correct counts
+- [ ] `/vibe_violations` returns ledger results after a violation is recorded
+- [ ] OpenRouter model → routed to OpenRouter API (not Anthropic)
+- [ ] Anthropic model → routed to Anthropic API
