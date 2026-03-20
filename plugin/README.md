@@ -32,7 +32,7 @@ Prod only updates when you explicitly run these steps. A `git pull` in your dev 
 
 ## Configure
 
-Add to your OpenClaw `config.yml`:
+Add to your OpenClaw config (`openclaw.json`):
 
 ```yaml
 plugins:
@@ -244,6 +244,27 @@ These are known limitations to revisit after launch with real traffic:
 
 ## Changelog
 
+### v1.1.3
+- Added `vibeModel` config option — override the AI model used for vibe review (defaults to OpenClaw primary)
+- Hardened Discord suppression fallback for edge cases in message routing
+- Fixed subagent session cleanup to avoid leaking sessions on timeout
+- Fixed `!banano stop/start` to claim channel reply and suppress main agent leakthrough
+
+### v1.1.2
+- Fixed claim window behavior: window now releases cleanly on false alarm
+- Fixed false alarm path: channel reply claim is freed so normal replies can resume
+- Fixed jump link: guarded against missing `guildId`/`messageId` to prevent broken links
+- Tightened dedupe: sentiment check now happens after dedupe to avoid double-counting
+
+### v1.1.1
+- Fixed isolated review runtime call to include `idempotencyKey`
+- Fixed Discord send path to use OpenClaw's native `sendMessageDiscord(target, text, opts)` signature
+- Fixed Discord author attribution using `senderName` / `senderUsername`
+- Added `authorId` to logs and mod escalations for reliable later moderation actions
+- Claimed-turn suppression: when moderation triggers, Banano suppresses normal watched-channel replies for that turn
+- Retry-once moderation review failure handling, with second failure logged and sent to mod channel only
+- Removed stale config docs for `pendingCheckTimeoutMs` / `maxPendingChecks`
+
 ### v1.0.0
 - CLI summary script: `npm run logs` — flags, false alarms, escalations, top channels, recent events
 - Static HTML viewer: `scripts/logs-viewer.html` — drag-and-drop JSONL, filter/search, charts
@@ -258,15 +279,6 @@ These are known limitations to revisit after launch with real traffic:
 - `highSeverityPublicReply` config — explicit control over whether high-severity also replies publicly
 - Stats counters wired to all decision paths
 - Silent escalation note in mod alert when `highSeverityPublicReply: false`
-
-### v1.1.1
-- Fixed isolated review runtime call to include `idempotencyKey`
-- Fixed Discord send path to use OpenClaw's native `sendMessageDiscord(target, text, opts)` signature
-- Fixed Discord author attribution using `senderName` / `senderUsername`
-- Added `authorId` to logs and mod escalations for reliable later moderation actions
-- Claimed-turn suppression: when moderation triggers, Banano suppresses normal watched-channel replies for that turn
-- Retry-once moderation review failure handling, with second failure logged and sent to mod channel only
-- Removed stale config docs for `pendingCheckTimeoutMs` / `maxPendingChecks`
 
 ### v0.2.0
 - Correlation IDs — UUID per check, exact-match interception
