@@ -71,8 +71,13 @@ plugins:
         sentimentThreshold: -2
 
         # Escalation policy
-        modEscalationMinSeverity: high   # low | medium | high (default: high)
-        highSeverityPublicReply: true    # false = silent mod-only escalation for high severity
+        # modEscalationMinSeverity controls which severity levels get posted to the mod channel:
+        #   low    → all toxic messages go to mod channel (best for testing/visibility)
+        #   medium → only medium + high severity go to mod channel
+        #   high   → only high severity (direct threats, serious attacks) go to mod channel
+        # In all cases, Banano still replies in-channel to flagged messages (if suggestedResponse set).
+        modEscalationMinSeverity: low    # low | medium | high (default: high)
+        highSeverityPublicReply: true    # false = silent mod-only escalation for high severity; true = Banano also replies publicly
 
         # AI model for vibe review (optional — see Model Selection below)
         vibeModel: "openrouter/google/gemma-3-27b-it:free"
