@@ -9,7 +9,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "deploy": "npm run build && openclaw plugins install . && openclaw gateway restart",
+    "test": "npm run build && node scripts/test.mjs",
+    "deploy": "npm run build && cp -r dist/* ~/.openclaw/extensions/banano-vibe/dist/ && openclaw gateway restart",
     "logs": "node scripts/logs-summary.mjs",
     "logs:all": "node scripts/logs-summary.mjs --all",
     "logs:path": "echo ~/.openclaw/extensions/banano-vibe/logs"
