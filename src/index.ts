@@ -1325,13 +1325,17 @@ const plugin = {
       const content = typeof msg.content === "string" ? msg.content.trim() : "";
       if (!content) return;
 
-      // OpenClaw Discord `to` format: "discord:channel:<channelId>"
+      // OpenClaw Discord `to` formats observed: "discord:channel:<id>", "channel:<id>", or bare "<id>"
       const rawTo = typeof msg.metadata?.to === "string" ? msg.metadata.to : "";
       const channelId = rawTo.startsWith("discord:channel:")
         ? rawTo.slice("discord:channel:".length)
-        : rawTo.startsWith("discord:")
-          ? rawTo.slice("discord:".length)
-          : rawTo;
+        : rawTo.startsWith("channel:")
+          ? rawTo.slice("channel:".length)
+          : rawTo.startsWith("discord:")
+            ? rawTo.slice("discord:".length)
+            : rawTo;
+
+      logger.info(`[banano-vibe] DIAG_MESSAGE_RECEIVED rawTo=${rawTo} channelId=${channelId} author=${msg.metadata?.senderName ?? msg.from}`);
 
       await processVibeMessage(
         channelId,
