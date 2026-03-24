@@ -1,10 +1,15 @@
-# Banano Vibe Monitor — OpenClaw Plugin v1.6.0
+# Banano Vibe Monitor — OpenClaw Plugin v1.7.1
 
 Two-layer vibe moderation for Discord channels, running natively inside OpenClaw.
 
 ## How it works
 
+The plugin opens its **own Discord WebSocket connection** directly to the Discord gateway — bypassing OpenClaw's allowlists entirely. This is the **single inbound path**: it sees all messages in watched channels regardless of who sent them or how OpenClaw is configured.
+
 ```
+Discord gateway (direct WS — single inbound path)
+        │
+        ▼
 All messages in watched channels
         │
         ▼
@@ -19,8 +24,6 @@ Layer 1: Sentiment score (free, local, instant)
                                 ├── mild → in-channel redirect
                                 └── escalation → mod channel alert + jump link
 ```
-
-The plugin opens its own Discord WebSocket connection, bypassing OpenClaw's allowlists — it sees **all** messages in watched channels regardless of routing configuration.
 
 ---
 
