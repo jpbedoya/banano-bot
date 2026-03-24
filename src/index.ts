@@ -708,7 +708,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "1.9.1",
+  version: "2.0.0",
 
   register(api: PluginApi) {
     // Load .env first (needed for enabled check to work with env-driven config)
@@ -744,9 +744,10 @@ const plugin = {
       logger.warn("[banano-vibe] No watched channels configured — plugin will not trigger");
     }
 
+    // Token still needed for REST API calls (fetchRecentMessages context window)
     const discordToken = resolveDiscordToken(api.config);
     if (!discordToken) {
-      logger.error("[banano-vibe] No Discord token in OpenClaw config — cannot operate");
+      logger.error("[banano-vibe] No Discord token in OpenClaw config — cannot fetch message context");
       return;
     }
     const token: string = discordToken;
@@ -757,7 +758,7 @@ const plugin = {
     initViolations(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v1.9.1 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v2.0.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -807,7 +808,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.9.1**",
+          "🦍 **Banano Vibe Monitor v2.0.0**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -1300,36 +1301,56 @@ const plugin = {
       }
     }
 
-    // ── Direct Discord gateway (sees ALL messages, bypasses OpenClaw routing) ──
-    // This is the single inbound path. The message_received hook was removed
-    // because the direct gateway already sees everything the hook would see,
-    // plus messages from users filtered by OpenClaw's allowlists. Having both
-    // active caused duplicate processing of the same message.
-    const directGateway = startDirectGateway(
-      token,
-      config.watchedChannelIds,
-      async (msg: DiscordMessageEvent) => {
-        const content = msg.content?.trim();
-        if (!content) return;
-        await processVibeMessage(
-          msg.channel_id,
-          content,
-          msg.author.id,
-          msg.author.username,
-          msg.id,
-          msg.guild_id,
-        );
-      },
-      logger,
-    );
+    // ── message_received hook (OpenClaw's inbound pipeline) ─────────────────
+    // Uses OpenClaw's built-in Discord connection — no separate WebSocket.
+    // groupPolicy: open on the MonkeDAO guild ensures all messages reach here,
+    // not just from allowlisted users.
+    api.on("message_received", async (event: unknown) => {
+      const msg = event as {
+        from?: string;
+        content?: string;
+        metadata?: {
+          provider?: string;
+          to?: string;
+          messageId?: string;
+          senderId?: string;
+          senderName?: string;
+          guildId?: string;
+        };
+      };
 
-    setActiveGateway(directGateway);
-    logger.info("[banano-vibe] Direct gateway listener started — watching all messages in watched channels");
+      // Only Discord
+      if (msg.metadata?.provider !== "discord") return;
+
+      const content = typeof msg.content === "string" ? msg.content.trim() : "";
+      if (!content) return;
+
+      // OpenClaw Discord `to` format: "discord:channel:<channelId>"
+      const rawTo = typeof msg.metadata?.to === "string" ? msg.metadata.to : "";
+      const channelId = rawTo.startsWith("discord:channel:")
+        ? rawTo.slice("discord:channel:".length)
+        : rawTo.startsWith("discord:")
+          ? rawTo.slice("discord:".length)
+          : rawTo;
+
+      await processVibeMessage(
+        channelId,
+        content,
+        msg.metadata?.senderId,
+        msg.metadata?.senderName ?? msg.from ?? "unknown",
+        msg.metadata?.messageId,
+        msg.metadata?.guildId,
+      );
+    });
+
+    logger.info("[banano-vibe] message_received hook registered — watching all messages in watched channels");
+
+    // Mark active (no gateway to manage, but we still set registered)
+    setActiveGateway({ stop: () => { /* no-op — hook unregistered by OpenClaw on unload */ } });
 
     // Clean up on plugin unload
     if (typeof (api as Record<string, unknown>).onUnload === "function") {
       ((api as Record<string, unknown>).onUnload as (fn: () => void) => void)(() => {
-        directGateway.stop();
         setActiveGateway(null);
         if (statsTimer) clearTimeout(statsTimer);
         setRegistered(false);
