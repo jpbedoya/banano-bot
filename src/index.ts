@@ -77,23 +77,10 @@ type PluginApi = {
   resolvePath: (input: string) => string;
 };
 
-type MessageReceivedEvent = {
-  from: string;
-  content: string;
-  timestamp?: number;
-  metadata?: Record<string, unknown>;
-};
-
 type MessageContext = {
   channelId: string;
   accountId?: string;
   conversationId?: string;
-};
-
-type ResolvedDiscordContext = {
-  isDiscord: boolean;
-  discordChannelId: string | null;
-  source: string;
 };
 
 // ── Config ───────────────────────────────────────────────────────────────────
@@ -253,66 +240,6 @@ function extractTrailingId(value: string | undefined): string | null {
   if (/^\d+$/.test(trimmed)) return trimmed;
   const match = trimmed.match(/(?:discord:|channel:|conversation:|chat:)?(\d{6,})$/);
   return match?.[1] ?? null;
-}
-
-function resolveDiscordContext(
-  msgCtx: MessageContext,
-  metadata: Record<string, unknown> | undefined,
-): ResolvedDiscordContext {
-  const md = metadata || {};
-  const provider = typeof md.provider === "string" ? md.provider : "";
-  const channel = typeof md.channel === "string" ? md.channel : "";
-  const surface = typeof md.surface === "string" ? md.surface : "";
-  const chatId = typeof md.chat_id === "string" ? md.chat_id : "";
-  const metadataChannelId = typeof md.channelId === "string" ? md.channelId : "";
-  const conversationId = typeof msgCtx.conversationId === "string" ? msgCtx.conversationId : "";
-  const ctxChannelId = typeof msgCtx.channelId === "string" ? msgCtx.channelId : "";
-
-  // Require an explicit discord signal — don't match on bare "channel:" prefix
-  // which could be used by other providers (Slack, etc.)
-  const isDiscord =
-    [provider, channel, surface, ctxChannelId].includes("discord") ||
-    chatId.startsWith("discord:") ||
-    conversationId.startsWith("discord:");
-
-  const discordChannelId =
-    extractTrailingId(metadataChannelId) ||
-    extractTrailingId(chatId) ||
-    extractTrailingId(conversationId) ||
-    extractTrailingId(ctxChannelId);
-
-  let source = "unknown";
-  if (extractTrailingId(metadataChannelId)) source = "metadata.channelId";
-  else if (extractTrailingId(chatId)) source = "metadata.chat_id";
-  else if (extractTrailingId(conversationId)) source = "ctx.conversationId";
-  else if (extractTrailingId(ctxChannelId)) source = "ctx.channelId";
-
-  return { isDiscord, discordChannelId, source };
-}
-
-function resolveAuthorName(msg: MessageReceivedEvent, metadata: Record<string, unknown> | undefined): string {
-  const md = metadata || {};
-  const candidates = [
-    typeof md.senderName === "string" ? md.senderName : null,
-    typeof md.senderUsername === "string" ? md.senderUsername : null,
-    typeof md.username === "string" ? md.username : null,
-    typeof md.tag === "string" ? md.tag : null,
-    typeof md.name === "string" ? md.name : null,
-    typeof md.sender === "string" ? md.sender : null,
-    typeof md.label === "string" ? md.label : null,
-    typeof msg.from === "string" ? msg.from : null,
-  ];
-
-  for (const candidate of candidates) {
-    const trimmed = candidate?.trim();
-    if (!trimmed) continue;
-    if (/^(?:discord:|channel:)\d+$/.test(trimmed)) continue;
-    return trimmed;
-  }
-
-  const senderId = typeof md.senderId === "string" ? md.senderId.trim() : "";
-  if (senderId) return `user:${senderId}`;
-  return "unknown";
 }
 
 // ── Discord REST helpers ──────────────────────────────────────────────────────
@@ -729,7 +656,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "1.7.0",
+  version: "1.7.1",
 
   register(api: PluginApi) {
     // Load .env first (needed for enabled check to work with env-driven config)
@@ -767,7 +694,7 @@ const plugin = {
     initViolations(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v1.7.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v1.7.1 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -817,7 +744,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.7.0**",
+          "🦍 **Banano Vibe Monitor v1.7.1**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -1301,30 +1228,11 @@ const plugin = {
       }
     }
 
-    // ── message_received hook (OpenClaw-routed messages) ─────────────────
-    api.on("message_received", async (event: unknown, ctx: unknown) => {
-      const msg = event as MessageReceivedEvent;
-      const msgCtx = ctx as MessageContext;
-      const metadata = msg.metadata || {};
-
-      const resolved = resolveDiscordContext(msgCtx, metadata);
-      if (!resolved.isDiscord) return;
-
-      const content = msg.content?.trim();
-      if (!content) return;
-
-      const discordChannelId = resolved.discordChannelId;
-      if (!discordChannelId) return;
-
-      const messageId = (metadata.messageId ?? metadata.message_id ?? metadata.id) as string | undefined;
-      const guildId = (metadata.guildId ?? metadata.guild_id) as string | undefined;
-      const authorId = (metadata.senderId ?? metadata.userId ?? metadata.sender_id ?? metadata.user_id) as string | undefined;
-      const authorName = resolveAuthorName(msg, metadata);
-
-      await processVibeMessage(discordChannelId, content, authorId, authorName, messageId, guildId);
-    });
-
     // ── Direct Discord gateway (sees ALL messages, bypasses OpenClaw routing) ──
+    // This is the single inbound path. The message_received hook was removed
+    // because the direct gateway already sees everything the hook would see,
+    // plus messages from users filtered by OpenClaw's allowlists. Having both
+    // active caused duplicate processing of the same message.
     const directGateway = startDirectGateway(
       token,
       config.watchedChannelIds,
