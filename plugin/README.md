@@ -1,4 +1,4 @@
-# Banano Vibe Monitor — OpenClaw Plugin v1.4.1
+# Banano Vibe Monitor — OpenClaw Plugin v1.5.1
 
 Two-layer vibe moderation for Discord channels, running natively inside OpenClaw.
 
@@ -157,7 +157,19 @@ The plugin tries each model in order and returns the first successful result. On
 
 ### Key storage
 
-Keys are read automatically from `~/.openclaw/agents/main/agent/auth-profiles.json`. OpenClaw populates this file when you configure providers via `openclaw configure`. You do not need to add keys manually.
+The plugin resolves the OpenRouter key in this priority order:
+
+1. **`BANANO_OPENROUTER_KEY` env var** — set via the plugin's own `.env` file (recommended, isolated from OpenClaw config)
+2. **OpenClaw `auth-profiles.json`** — fallback if env var is not set
+
+**Recommended: use the `.env` file** so the key is fully decoupled from OpenClaw's auth setup:
+
+```bash
+# Create/edit the plugin's .env file
+echo "BANANO_OPENROUTER_KEY=sk-or-v1-..." > ~/.openclaw/extensions/banano-vibe/.env
+```
+
+The plugin loads this file on startup automatically. To rotate the key, just update the `.env` and restart the gateway.
 
 To verify your keys are present:
 ```bash
@@ -325,6 +337,13 @@ openclaw gateway restart
 ---
 
 ## Changelog
+
+### v1.5.1
+- **Singleton guard** — `register()` now exits early if already called. Prevents OpenClaw from spawning multiple Discord gateway connections and duplicate `message_sending` hooks per restart cycle, which was causing the plugin to cancel outgoing Telegram replies and hammer Discord with reconnects.
+
+### v1.5.0
+- **`BANANO_OPENROUTER_KEY` env var** — plugin now checks this env var first before falling back to OpenClaw's `auth-profiles.json`. Load it from a `.env` file in the plugin install directory (`~/.openclaw/extensions/banano-vibe/.env`) to keep the key fully isolated from OpenClaw's auth config.
+- **`.env` auto-load** — plugin reads `.env` from its install directory on startup. No manual env export needed.
 
 ### v1.4.1
 - **Fallback model chain** — `vibeModelFallbacks` config (array) lets you specify ordered fallbacks tried automatically on 429/5xx/empty response. Default chain: `llama-3.3-70b:free` → `nemotron-3-nano:free` → `claude-haiku-4-5`
