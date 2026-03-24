@@ -25,6 +25,7 @@ import {
 } from "./violations.js";
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as fsp from "fs/promises";
 import * as path from "path";
 
 // ── Minimal types ────────────────────────────────────────────────────────────
@@ -233,6 +234,14 @@ function sanitizeForPrompt(text: string): string {
     .replace(/"/g, '\\"')
     .replace(/`/g, "'")
     .slice(0, 500); // hard cap on user content length in prompt
+}
+
+// ── Discord markdown escaping ─────────────────────────────────────────────────
+// Escape user-controlled content before inserting into Discord messages
+// to prevent markdown injection in mod alerts.
+
+function escapeDiscordMarkdown(text: string): string {
+  return text.replace(/([*_`~|>\\])/g, "\\$1");
 }
 
 // ── Discord context resolution ────────────────────────────────────────────────
@@ -720,7 +729,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "1.6.0",
+  version: "1.7.0",
 
   register(api: PluginApi) {
     // Load .env first (needed for enabled check to work with env-driven config)
@@ -758,21 +767,49 @@ const plugin = {
     initViolations(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v1.6.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v1.7.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
-    // ── Counters for /vibe_stats ─────────────────────────────────────────
-    const stats = {
-      flagged: 0,
-      falseAlarms: 0,
-      mildResponses: 0,
-      escalations: 0,
-      cooldownSuppressed: 0,
-      dedupeSuppressed: 0,
-      reviewErrors: 0,
-      startedAt: Date.now(),
+    // ── Persistent stats ─────────────────────────────────────────────────
+    const statsPath = path.join(stateDir, "stats.json");
+    let statsTimer: ReturnType<typeof setTimeout> | null = null;
+
+    type VibeStats = {
+      flagged: number;
+      falseAlarms: number;
+      mildResponses: number;
+      escalations: number;
+      cooldownSuppressed: number;
+      dedupeSuppressed: number;
+      reviewErrors: number;
+      startedAt: number;
+      lastSaved: string;
     };
+
+    function loadStats(): VibeStats {
+      try {
+        if (fs.existsSync(statsPath)) {
+          return JSON.parse(fs.readFileSync(statsPath, "utf8")) as VibeStats;
+        }
+      } catch { /* */ }
+      return {
+        flagged: 0, falseAlarms: 0, mildResponses: 0, escalations: 0,
+        cooldownSuppressed: 0, dedupeSuppressed: 0, reviewErrors: 0,
+        startedAt: Date.now(), lastSaved: new Date().toISOString(),
+      };
+    }
+
+    function scheduleStatsSave(): void {
+      if (statsTimer) clearTimeout(statsTimer);
+      statsTimer = setTimeout(() => {
+        statsTimer = null;
+        stats.lastSaved = new Date().toISOString();
+        fsp.writeFile(statsPath, JSON.stringify(stats, null, 2), "utf8").catch(() => { /* best-effort */ });
+      }, 2000);
+    }
+
+    const stats = loadStats();
 
     // ── /vibe_status command ─────────────────────────────────────────────
     api.registerCommand({
@@ -780,7 +817,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.6.0**",
+          "🦍 **Banano Vibe Monitor v1.7.0**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -811,6 +848,7 @@ const plugin = {
             `Review errors/timeouts: ${stats.reviewErrors}`,
             `Cooldown suppressed: ${stats.cooldownSuppressed}`,
             `Dedupe suppressed: ${stats.dedupeSuppressed}`,
+            `Last saved: ${stats.lastSaved ? new Date(stats.lastSaved).toUTCString() : "not yet"}`,
           ].join("\n"),
         };
       },
@@ -1047,6 +1085,7 @@ const plugin = {
       // Dedupe — messageId is always present from the direct gateway path
       if (messageId && isDuplicate(messageId, config.dedupeWindowMs)) {
         stats.dedupeSuppressed++;
+        scheduleStatsSave();
         logDecision(logger, "DEDUPE", { messageId, channel: discordChannelId });
         return;
       }
@@ -1054,6 +1093,7 @@ const plugin = {
       // Cooldown
       if (isOnCooldown(discordChannelId, config.cooldownMs)) {
         stats.cooldownSuppressed++;
+        scheduleStatsSave();
         logDecision(logger, "COOLDOWN", { channel: discordChannelId });
         return;
       }
@@ -1070,6 +1110,7 @@ const plugin = {
       }
 
       stats.flagged++;
+      scheduleStatsSave();
       claimChannelReply(discordChannelId, config.vibeReviewTimeoutMs * 2 + 15_000);
       logDecision(logger, "SENTIMENT_FLAG", {
         score,
@@ -1116,6 +1157,7 @@ const plugin = {
 
       if (!review.raw) {
         stats.reviewErrors++;
+        scheduleStatsSave();
         const errorSummary = review.error || "unknown review failure";
         logDecision(logger, "VIBE_CHECK_ERROR", {
           correlationId,
@@ -1132,10 +1174,10 @@ const plugin = {
               : null;
           const alert = [
             `⚠️ **Vibe review failed** in <#${discordChannelId}>`,
-            `**User:** ${authorName}${authorId ? ` (<@${authorId}>)` : ""}`,
+            `**User:** ${escapeDiscordMarkdown(authorName)}${authorId ? ` (<@${authorId}>)` : ""}`,
             `**User ID:** ${authorId ?? "unknown"}`,
-            `**Message:** "${content.slice(0, 200)}"`,
-            `**Error:** ${errorSummary}`,
+            `**Message:** \`${escapeDiscordMarkdown(content.slice(0, 200))}\``,
+            `**Error:** ${escapeDiscordMarkdown(errorSummary)}`,
           ];
           if (jumpLink) alert.push(`[Jump to message](${jumpLink})`);
           await sendDiscord(config.modChannelId, alert.join("\n"));
@@ -1146,6 +1188,7 @@ const plugin = {
       const result = parseVibeResult(review.raw);
       if (!result) {
         stats.reviewErrors++;
+        scheduleStatsSave();
         logDecision(logger, "VIBE_CHECK_ERROR", {
           correlationId,
           channel: discordChannelId,
@@ -1173,6 +1216,7 @@ const plugin = {
 
       if (!result.isToxic) {
         stats.falseAlarms++;
+        scheduleStatsSave();
         releaseChannelReply(discordChannelId);
         logDecision(logger, "FALSE_ALARM", {
           correlationId,
@@ -1197,6 +1241,7 @@ const plugin = {
       if (shouldReplyPublicly) {
         await sendDiscord(discordChannelId, result.suggestedResponse!);
         stats.mildResponses++;
+        scheduleStatsSave();
         logDecision(logger, "MILD_RESPONSE", {
           correlationId,
           severity: result.severity,
@@ -1228,11 +1273,11 @@ const plugin = {
 
         const alert = [
           `🚨 **Vibe alert** in <#${discordChannelId}>${strikeText}`,
-          `**User:** ${authorName}${authorId ? ` (<@${authorId}>)` : ""}`,
+          `**User:** ${escapeDiscordMarkdown(authorName)}${authorId ? ` (<@${authorId}>)` : ""}`,
           `**User ID:** ${authorId ?? "unknown"}`,
-          `**Message:** "${content.slice(0, 200)}"`,
+          `**Message:** \`${escapeDiscordMarkdown(content.slice(0, 200))}\``,
           `**Severity:** ${result.severity}`,
-          `**Reason:** ${result.reason}`,
+          `**Reason:** ${escapeDiscordMarkdown(result.reason)}`,
           `**Model:** ${review.modelUsed ?? "unknown"}`,
         ];
         if (jumpLink) alert.push(`[Jump to message](${jumpLink})`);
@@ -1242,6 +1287,7 @@ const plugin = {
 
         await sendDiscord(config.modChannelId!, alert.join("\n"));
         stats.escalations++;
+        scheduleStatsSave();
         logDecision(logger, "HIGH_ESCALATION", {
           correlationId,
           severity: result.severity,
@@ -1303,7 +1349,8 @@ const plugin = {
     if (typeof (api as Record<string, unknown>).onUnload === "function") {
       ((api as Record<string, unknown>).onUnload as (fn: () => void) => void)(() => {
         directGateway.stop();
-        _registered = false; // Reset so plugin can be re-registered after unload
+        if (statsTimer) clearTimeout(statsTimer);
+        _registered = false;
       });
     }
   },

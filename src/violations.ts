@@ -1,9 +1,12 @@
 /**
  * Violation ledger — JSON-backed per-user strike tracking.
  * Stored at: <pluginDir>/moderation/violations.json
+ *
+ * Writes are async and debounced to avoid blocking the event loop.
  */
 
 import * as fs from "fs";
+import * as fsp from "fs/promises";
 import * as path from "path";
 
 export type ViolationEntry = {
@@ -14,7 +17,7 @@ export type ViolationEntry = {
   channelId: string;
   messageId?: string;
   guildId?: string;
-  issuedBy: "auto" | string; // "auto" = plugin, or mod username
+  issuedBy: "auto" | string;
 };
 
 export type MemberRecord = {
@@ -31,6 +34,7 @@ export type ViolationsLedger = {
 
 let ledgerPath: string;
 let ledger: ViolationsLedger;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function initViolations(pluginDir: string): void {
   const dir = path.join(pluginDir, "moderation");
@@ -41,19 +45,21 @@ export function initViolations(pluginDir: string): void {
       ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8"));
     } else {
       ledger = { version: 1, members: {} };
-      saveLedger();
+      scheduleSave();
     }
   } catch {
     ledger = { version: 1, members: {} };
   }
 }
 
-function saveLedger(): void {
-  try {
-    fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
-  } catch {
-    // Best-effort
-  }
+function scheduleSave(debounceMs = 500): void {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    fsp.writeFile(ledgerPath, JSON.stringify(ledger, null, 2), "utf8").catch(() => {
+      // Best-effort — loss of a single write is acceptable
+    });
+  }, debounceMs);
 }
 
 export function recordViolation(params: {
@@ -73,7 +79,7 @@ export function recordViolation(params: {
   }
 
   const member = ledger.members[userId];
-  member.username = username; // keep updated
+  member.username = username;
   member.strikes += 1;
 
   const entry: ViolationEntry = {
@@ -88,7 +94,7 @@ export function recordViolation(params: {
   };
 
   member.history.push(entry);
-  saveLedger();
+  scheduleSave();
   return member;
 }
 
