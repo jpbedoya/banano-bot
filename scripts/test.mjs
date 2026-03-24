@@ -138,37 +138,20 @@ console.log("\n── Stats persistence ──");
   assert("Stats has lastSaved", typeof loaded.lastSaved === "string");
 }
 
-// ── 6. Dedupe — filesystem lock (tryClaimMessage) ────────────────────────────
+// ── 6. Dedupe — in-memory globalThis Set (tryClaimMessage) ───────────────────
 console.log("\n── Dedupe (single-path guarantee) ──");
 {
-  const LOCK_DIR = path.join(tmpdir(), "banano-vibe-locks-test");
-  const LOCK_TTL_MS = 60_000;
-
-  // Clean test lock dir
-  if (fs.existsSync(LOCK_DIR)) {
-    for (const f of fs.readdirSync(LOCK_DIR)) {
-      try { fs.unlinkSync(path.join(LOCK_DIR, f)); } catch { /* */ }
-    }
-  }
-  fs.mkdirSync(LOCK_DIR, { recursive: true });
+  // Simulate globalThis shared Set (same logic as production code)
+  const claimedIds = new Set();
 
   function tryClaimMessage(messageId) {
-    const lockFile = path.join(LOCK_DIR, `${messageId}.lock`);
-    const now = Date.now();
-    for (const f of fs.readdirSync(LOCK_DIR)) {
-      const fp = path.join(LOCK_DIR, f);
-      try {
-        const stat = fs.statSync(fp);
-        if (now - stat.mtimeMs > LOCK_TTL_MS) fs.unlinkSync(fp);
-      } catch { /* */ }
+    if (claimedIds.has(messageId)) return false;
+    claimedIds.add(messageId);
+    if (claimedIds.size > 1000) {
+      const toDelete = [...claimedIds].slice(0, claimedIds.size - 1000);
+      for (const id of toDelete) claimedIds.delete(id);
     }
-    try {
-      const fd = fs.openSync(lockFile, "wx");
-      fs.closeSync(fd);
-      return true;
-    } catch {
-      return false;
-    }
+    return true;
   }
 
   const msgId = "1485889191660490772";
@@ -177,7 +160,7 @@ console.log("\n── Dedupe (single-path guarantee) ──");
   const first = tryClaimMessage(msgId);
   assert("First call returns false (not duplicate)", first === true);
 
-  // Second call with same ID — lock file exists, should be blocked
+  // Second call with same ID — already in set, should be blocked
   const second = tryClaimMessage(msgId);
   assert("Second call with same ID returns true (duplicate)", second === false);
 
