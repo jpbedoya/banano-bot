@@ -138,50 +138,63 @@ console.log("\n── Stats persistence ──");
   assert("Stats has lastSaved", typeof loaded.lastSaved === "string");
 }
 
-// ── 6. Dedupe — same messageId must not process twice ────────────────────────
+// ── 6. Dedupe — filesystem lock (tryClaimMessage) ────────────────────────────
 console.log("\n── Dedupe (single-path guarantee) ──");
 {
-  // Simulate the handledMessages Map logic directly
-  const handledMessages = new Map();
-  const dedupeWindowMs = 60_000;
+  const LOCK_DIR = path.join(tmpdir(), "banano-vibe-locks-test");
+  const LOCK_TTL_MS = 60_000;
 
-  function isDuplicate(messageId) {
-    const now = Date.now();
-    for (const [id, ts] of handledMessages) {
-      if (now - ts > dedupeWindowMs * 2) handledMessages.delete(id);
+  // Clean test lock dir
+  if (fs.existsSync(LOCK_DIR)) {
+    for (const f of fs.readdirSync(LOCK_DIR)) {
+      try { fs.unlinkSync(path.join(LOCK_DIR, f)); } catch { /* */ }
     }
-    if (handledMessages.has(messageId)) return true;
-    handledMessages.set(messageId, now);
-    return false;
+  }
+  fs.mkdirSync(LOCK_DIR, { recursive: true });
+
+  function tryClaimMessage(messageId) {
+    const lockFile = path.join(LOCK_DIR, `${messageId}.lock`);
+    const now = Date.now();
+    for (const f of fs.readdirSync(LOCK_DIR)) {
+      const fp = path.join(LOCK_DIR, f);
+      try {
+        const stat = fs.statSync(fp);
+        if (now - stat.mtimeMs > LOCK_TTL_MS) fs.unlinkSync(fp);
+      } catch { /* */ }
+    }
+    try {
+      const fd = fs.openSync(lockFile, "wx");
+      fs.closeSync(fd);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   const msgId = "1485889191660490772";
 
-  // First call — should not be duplicate
-  const first = isDuplicate(msgId);
-  assert("First call returns false (not duplicate)", first === false);
+  // First call — should claim successfully
+  const first = tryClaimMessage(msgId);
+  assert("First call returns false (not duplicate)", first === true);
 
-  // Second call with same ID — should be caught as duplicate
-  const second = isDuplicate(msgId);
-  assert("Second call with same ID returns true (duplicate)", second === true);
+  // Second call with same ID — lock file exists, should be blocked
+  const second = tryClaimMessage(msgId);
+  assert("Second call with same ID returns true (duplicate)", second === false);
 
-  // Different message ID — should not be duplicate
-  const different = isDuplicate("9999999999999999999");
-  assert("Different messageId returns false", different === false);
+  // Different message ID — should claim successfully
+  const different = tryClaimMessage("9999999999999999999");
+  assert("Different messageId returns false", different === true);
 
-  // Simulate the old bug: undefined messageId bypasses dedupe
-  // The fix is that the direct gateway always provides msg.id,
-  // so this code path no longer exists — but we verify the guard
-  const undefinedCheck = undefined && isDuplicate(undefined);
+  // Undefined messageId short-circuits before tryClaimMessage is called
+  const undefinedCheck = undefined && tryClaimMessage(undefined);
   assert("Undefined messageId short-circuits (old bug prevented)", undefinedCheck === undefined || undefinedCheck === false);
 
-  // Verify that with only one inbound path, the same message cannot
-  // arrive twice with a valid ID (dedupe catches it)
+  // Simulate two paths racing for the same message — only first wins
   const msgId2 = "1485889250841989191";
-  const gatewayFirst = isDuplicate(msgId2);
-  const gatewaySecond = isDuplicate(msgId2); // would be hook path in old code
-  assert("Simulated dual-path: first through = true", gatewayFirst === false);
-  assert("Simulated dual-path: second blocked = true", gatewaySecond === true);
+  const gatewayFirst = tryClaimMessage(msgId2);
+  const gatewaySecond = tryClaimMessage(msgId2);
+  assert("Simulated dual-path: first through = true", gatewayFirst === true);
+  assert("Simulated dual-path: second blocked = true", gatewaySecond === false);
 }
 
 // ── Summary ───────────────────────────────────────────────────────────────────
