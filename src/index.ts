@@ -704,19 +704,32 @@ function startDirectGateway(
 // ensuring there is always exactly one active WS connection regardless of how
 // many times register() is called.
 
-let _registered = false;
-let _activeGateway: { stop: () => void } | null = null;
+// Use globalThis to persist state across jiti module reloads within the same
+// Node.js process. Module-level variables are reset on every jiti reimport,
+// but globalThis survives, making it the correct singleton store.
+const _global = globalThis as typeof globalThis & {
+  __bananoVibeRegistered?: boolean;
+  __bananoVibeGateway?: { stop: () => void } | null;
+};
+if (_global.__bananoVibeRegistered === undefined) _global.__bananoVibeRegistered = false;
+if (_global.__bananoVibeGateway === undefined) _global.__bananoVibeGateway = null;
+
+// Convenience accessors
+function isRegistered(): boolean { return !!_global.__bananoVibeRegistered; }
+function setRegistered(v: boolean): void { _global.__bananoVibeRegistered = v; }
+function getActiveGateway(): { stop: () => void } | null { return _global.__bananoVibeGateway ?? null; }
+function setActiveGateway(gw: { stop: () => void } | null): void { _global.__bananoVibeGateway = gw; }
 
 const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "1.8.0",
+  version: "1.9.0",
 
   register(api: PluginApi) {
     // Load .env first (needed for enabled check to work with env-driven config)
     loadDotEnv(api.resolvePath("."));
-    api.logger.info(`[banano-vibe] DIAG_REGISTER_CALLED _registered=${_registered} _activeGateway=${_activeGateway !== null}`);
+    api.logger.info(`[banano-vibe] DIAG_REGISTER_CALLED _registered=${isRegistered()} _activeGateway=${getActiveGateway() !== null}`);
 
     const config = resolveConfig(api.pluginConfig);
     const logger = api.logger;
@@ -730,17 +743,18 @@ const plugin = {
     // SIGUSR1 config reloads reuse the Node module cache and call register()
     // multiple times concurrently. We set _registered = true immediately to
     // block concurrent calls, then stop the old gateway if one exists.
-    if (_registered) {
-      if (_activeGateway) {
+    if (isRegistered()) {
+      const existing = getActiveGateway();
+      if (existing) {
         logger.info("[banano-vibe] Reloading — stopping existing gateway");
-        _activeGateway.stop();
-        _activeGateway = null;
+        existing.stop();
+        setActiveGateway(null);
       } else {
         logger.info("[banano-vibe] Already registered — skipping duplicate register()");
         return;
       }
     }
-    _registered = true;
+    setRegistered(true);
 
     if (config.watchedChannelIds.length === 0) {
       logger.warn("[banano-vibe] No watched channels configured — plugin will not trigger");
@@ -759,7 +773,7 @@ const plugin = {
     initViolations(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v1.8.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v1.9.0 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -809,7 +823,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.8.0**",
+          "🦍 **Banano Vibe Monitor v1.9.0**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -1307,7 +1321,7 @@ const plugin = {
     // because the direct gateway already sees everything the hook would see,
     // plus messages from users filtered by OpenClaw's allowlists. Having both
     // active caused duplicate processing of the same message.
-    const directGateway = _activeGateway = startDirectGateway(
+    const directGateway = startDirectGateway(
       token,
       config.watchedChannelIds,
       async (msg: DiscordMessageEvent) => {
@@ -1325,15 +1339,16 @@ const plugin = {
       logger,
     );
 
+    setActiveGateway(directGateway);
     logger.info("[banano-vibe] Direct gateway listener started — watching all messages in watched channels");
 
     // Clean up on plugin unload
     if (typeof (api as Record<string, unknown>).onUnload === "function") {
       ((api as Record<string, unknown>).onUnload as (fn: () => void) => void)(() => {
         directGateway.stop();
-        _activeGateway = null;
+        setActiveGateway(null);
         if (statsTimer) clearTimeout(statsTimer);
-        _registered = false;
+        setRegistered(false);
       });
     }
   },
