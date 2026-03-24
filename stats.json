@@ -1,11 +1,11 @@
 {
-  "flagged": 5,
-  "falseAlarms": 1,
-  "mildResponses": 4,
-  "escalations": 4,
+  "flagged": 7,
+  "falseAlarms": 2,
+  "mildResponses": 5,
+  "escalations": 5,
   "cooldownSuppressed": 4,
   "dedupeSuppressed": 0,
   "reviewErrors": 0,
   "startedAt": 1774333848668,
-  "lastSaved": "2026-03-24T06:36:20.208Z"
+  "lastSaved": "2026-03-24T06:43:55.129Z"
 }

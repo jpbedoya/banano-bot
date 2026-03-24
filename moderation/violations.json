@@ -54,6 +54,23 @@
           "issuedBy": "auto"
         }
       ]
+    },
+    "428063738931839006": {
+      "userId": "428063738931839006",
+      "username": "juamps",
+      "strikes": 1,
+      "history": [
+        {
+          "strike": 1,
+          "date": "2026-03-24",
+          "reason": "Contains personal insult ('you sob') and profanity directed at another user, which crosses into hostile territory despite possible banter.",
+          "severity": "medium",
+          "channelId": "1485792688677589144",
+          "messageId": "1485891872583847996",
+          "guildId": "874638621368533012",
+          "issuedBy": "auto"
+        }
+      ]
     }
   }
 }

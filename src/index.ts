@@ -647,16 +647,20 @@ function startDirectGateway(
 }
 
 // ── Singleton guard ───────────────────────────────────────────────────────────
-// OpenClaw may call register() multiple times per lifecycle. Without this guard,
-// each call spawns a new Discord gateway connection and a duplicate message_sending hook.
+// OpenClaw may call register() multiple times per lifecycle (config reload via
+// SIGUSR1 reuses the Node module cache, so module-level state persists).
+// We track the running gateway instance and stop it before starting a new one,
+// ensuring there is always exactly one active WS connection regardless of how
+// many times register() is called.
 
 let _registered = false;
+let _activeGateway: { stop: () => void } | null = null;
 
 const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "1.7.1",
+  version: "1.7.2",
 
   register(api: PluginApi) {
     // Load .env first (needed for enabled check to work with env-driven config)
@@ -670,8 +674,16 @@ const plugin = {
       return;
     }
 
-    // Singleton guard — after enabled check so disabling/re-enabling works correctly
-    if (_registered) {
+    // Singleton guard — stop any existing gateway before registering a new one.
+    // SIGUSR1 config reloads reuse the Node module cache, so _activeGateway may
+    // still be running from a previous registration. We always stop it first to
+    // ensure exactly one active WS connection.
+    if (_registered && _activeGateway) {
+      logger.info("[banano-vibe] Reloading — stopping existing gateway before re-registering");
+      _activeGateway.stop();
+      _activeGateway = null;
+      _registered = false;
+    } else if (_registered) {
       logger.info("[banano-vibe] Already registered — skipping duplicate register()");
       return;
     }
@@ -694,7 +706,7 @@ const plugin = {
     initViolations(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v1.7.1 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v1.7.2 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -744,7 +756,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v1.7.1**",
+          "🦍 **Banano Vibe Monitor v1.7.2**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -1233,7 +1245,7 @@ const plugin = {
     // because the direct gateway already sees everything the hook would see,
     // plus messages from users filtered by OpenClaw's allowlists. Having both
     // active caused duplicate processing of the same message.
-    const directGateway = startDirectGateway(
+    const directGateway = _activeGateway = startDirectGateway(
       token,
       config.watchedChannelIds,
       async (msg: DiscordMessageEvent) => {
@@ -1257,6 +1269,7 @@ const plugin = {
     if (typeof (api as Record<string, unknown>).onUnload === "function") {
       ((api as Record<string, unknown>).onUnload as (fn: () => void) => void)(() => {
         directGateway.stop();
+        _activeGateway = null;
         if (statsTimer) clearTimeout(statsTimer);
         _registered = false;
       });
