@@ -1,6 +1,52 @@
 /**
+ * Layer 0: Known slur/hate-phrase pre-filter — bypasses AFINN entirely.
  * Layer 1: Local sentiment scoring — free, instant, no API call.
  */
+
+const LATIN_SLUR_PATTERNS = [
+  /\bfaggots?\b/i,
+  /\bfags?\b/i,
+  /\bniggers?\b/i,
+  /\bniggas?\b/i,
+  /\bkikes?\b/i,
+  /\bchinks?\b/i,
+  /\bspicks?\b/i,
+  /\bspics?\b/i,
+  /\bwetbacks?\b/i,
+  /\bboongas?\b/i,
+  /\bboongy?\b/i,
+  /\bcoons?\b/i,
+  /\bgooks?\b/i,
+  /\btowelhead/i,
+  /\braghead/i,
+  /\btrann(?:y|ie?)s?\b/i,
+  /\bretards?\b/i,
+  /\bdykes?\b/i,
+  /\bcunts?\b/i,
+  /\btwats?\b/i,
+];
+
+const NON_LATIN_SLURS = [
+  'сука', 'блять', 'блядь', '操你', '傻逼', '𨳒', 'चूतिया',
+];
+
+/**
+ * Returns true if the text contains a known slur or hate phrase.
+ * Latin-script slurs use word-boundary matching; non-Latin uses substring match.
+ * When this returns true, the message bypasses AFINN and goes straight to AI review.
+ */
+export function containsKnownSlur(text: string): boolean {
+  for (const pattern of LATIN_SLUR_PATTERNS) {
+    if (pattern.test(text)) return true;
+  }
+  const lower = text.toLowerCase();
+  for (const slur of NON_LATIN_SLURS) {
+    if (lower.includes(slur.toLowerCase())) return true;
+  }
+  return false;
+}
+
+
 
 // @ts-ignore — sentiment has no types
 import Sentiment from "sentiment";
