@@ -32,7 +32,7 @@ import * as path from "path";
 import * as crypto from "crypto";
 import { getSentimentScore, containsKnownSlur, isLikelyNonEnglish } from "./sentiment.js";
 import { buildVibeCheckPrompt, parseVibeResult, type RecentMessage } from "./vibe-check.js";
-import { initViolations, recordViolation, getMember, getRecentViolations, formatMemberViolations } from "./violations.js";
+import { initViolations, recordViolation } from "./violations.js";
 
 // ── Env loading ───────────────────────────────────────────────────────────────
 
@@ -119,6 +119,7 @@ if (CONFIG.watchedChannelIds.length === 0) {
 // ── Logging ───────────────────────────────────────────────────────────────────
 
 if (!fs.existsSync(CONFIG.logDir)) fs.mkdirSync(CONFIG.logDir, { recursive: true });
+if (!fs.existsSync(CONFIG.dataDir)) fs.mkdirSync(CONFIG.dataDir, { recursive: true });
 
 function log(level: "INFO" | "WARN" | "ERROR", msg: string): void {
   const ts = new Date().toISOString();
@@ -138,9 +139,9 @@ function writeJsonlLog(decision: string, meta: Record<string, unknown>): void {
 
 const DISCORD_API = "https://discord.com/api/v10";
 
-async function discordGet<T>(path: string): Promise<T | null> {
+async function discordGet<T>(apiPath: string): Promise<T | null> {
   try {
-    const res = await fetch(`${DISCORD_API}${path}`, {
+    const res = await fetch(`${DISCORD_API}${apiPath}`, {
       headers: { Authorization: `Bot ${DISCORD_TOKEN}` },
       signal: AbortSignal.timeout(5000),
     });
