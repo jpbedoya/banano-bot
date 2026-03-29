@@ -295,12 +295,14 @@ async function handleMessage(msg: {
   // Dedupe
   if (isDuplicate(messageId)) {
     writeJsonlLog("DEDUPE", { messageId, channel: channelId });
+    stats.dedupeSuppressed++; scheduleStatsSave();
     return;
   }
 
   // Cooldown
   if (isOnCooldown(channelId)) {
     writeJsonlLog("COOLDOWN", { channel: channelId });
+    stats.cooldownSuppressed++; scheduleStatsSave();
     return;
   }
 
@@ -313,6 +315,7 @@ async function handleMessage(msg: {
 
   log("INFO", `SENTIMENT_FLAG score=${score} author=${author.username} channel=${channelId} preview="${content.slice(0, 60)}"`);
   writeJsonlLog("SENTIMENT_FLAG", { score, channel: channelId, author: author.username, authorId: author.id, preview: content.slice(0, 60) });
+  stats.flagged++; scheduleStatsSave();
 
   // Layer 2: AI review
   const recentMessages = await fetchRecentMessages(channelId, messageId, CONFIG.maxRecentMessages, CONFIG.contextFilterBots);
@@ -330,6 +333,7 @@ async function handleMessage(msg: {
   const review = await runVibeReview(prompt);
 
   if (!review.raw) {
+    stats.reviewErrors++; scheduleStatsSave();
     log("WARN", `VIBE_CHECK_ERROR correlationId=${correlationId} error=${review.error}`);
     writeJsonlLog("VIBE_CHECK_ERROR", { correlationId, channel: channelId, error: review.error });
     if (CONFIG.modChannelId) {
@@ -349,12 +353,14 @@ async function handleMessage(msg: {
   const result = parseVibeResult(review.raw);
 
   if (!result) {
+    stats.reviewErrors++; scheduleStatsSave();
     log("WARN", `VIBE_CHECK_ERROR correlationId=${correlationId} reason=parse_failure`);
     writeJsonlLog("VIBE_CHECK_ERROR", { correlationId, channel: channelId, reason: "parse_failure", raw: review.raw.slice(0, 200) });
     return;
   }
 
   if (!result.isToxic) {
+    stats.falseAlarms++; scheduleStatsSave();
     writeJsonlLog("FALSE_ALARM", { correlationId, reason: result.reason, channel: channelId });
     return;
   }
@@ -371,6 +377,7 @@ async function handleMessage(msg: {
   // Public in-channel response
   if (shouldReplyPublicly) {
     await discordPost(channelId, result.suggestedResponse!, messageId);
+    stats.mildResponses++; scheduleStatsSave();
     log("INFO", `MILD_RESPONSE correlationId=${correlationId} severity=${result.severity} channel=${channelId}`);
     writeJsonlLog("MILD_RESPONSE", { correlationId, severity: result.severity, channel: channelId, reason: result.reason });
   }
@@ -404,6 +411,7 @@ async function handleMessage(msg: {
     }
 
     await discordPost(CONFIG.modChannelId!, alert.join("\n"));
+    stats.escalations++; scheduleStatsSave();
     log("INFO", `HIGH_ESCALATION correlationId=${correlationId} severity=${result.severity} author=${author.username}`);
     writeJsonlLog("HIGH_ESCALATION", { correlationId, severity: result.severity, channel: channelId, author: author.username, authorId: author.id, reason: result.reason });
   }
@@ -548,7 +556,50 @@ function startGateway(): void {
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 
+// ── Persistent stats ─────────────────────────────────────────────────────────
+
+type VibeStats = {
+  flagged: number;
+  falseAlarms: number;
+  mildResponses: number;
+  escalations: number;
+  cooldownSuppressed: number;
+  dedupeSuppressed: number;
+  reviewErrors: number;
+  startedAt: number;
+  lastSaved: string;
+};
+
+let stats: VibeStats;
+let statsPath: string;
+let statsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function initStats(): void {
+  statsPath = path.join(CONFIG.dataDir, "stats.json");
+  try {
+    if (fs.existsSync(statsPath)) {
+      stats = JSON.parse(fs.readFileSync(statsPath, "utf8")) as VibeStats;
+      return;
+    }
+  } catch { /* */ }
+  stats = {
+    flagged: 0, falseAlarms: 0, mildResponses: 0, escalations: 0,
+    cooldownSuppressed: 0, dedupeSuppressed: 0, reviewErrors: 0,
+    startedAt: Date.now(), lastSaved: new Date().toISOString(),
+  };
+}
+
+function scheduleStatsSave(): void {
+  if (statsTimer) clearTimeout(statsTimer);
+  statsTimer = setTimeout(() => {
+    statsTimer = null;
+    stats.lastSaved = new Date().toISOString();
+    fsp.writeFile(statsPath, JSON.stringify(stats, null, 2), "utf8").catch(() => {});
+  }, 2000);
+}
+
 initViolations(CONFIG.dataDir);
+initStats();
 
 log("INFO", "Banano Vibe Monitor (standalone) starting");
 log("INFO", `Watching channels: ${CONFIG.watchedChannelIds.join(", ") || "NONE"}`);
