@@ -30,7 +30,7 @@ import * as fs from "fs";
 import * as fsp from "fs/promises";
 import * as path from "path";
 import * as crypto from "crypto";
-import { getSentimentScore } from "./sentiment.js";
+import { getSentimentScore, containsKnownSlur, isLikelyNonEnglish } from "./sentiment.js";
 import { buildVibeCheckPrompt, parseVibeResult, type RecentMessage } from "./vibe-check.js";
 import { initViolations, recordViolation, getMember, getRecentViolations, formatMemberViolations } from "./violations.js";
 
@@ -83,7 +83,13 @@ function envBool(key: string, fallback: boolean): boolean {
 }
 
 const DISCORD_TOKEN = requireEnv("DISCORD_BOT_TOKEN");
-const OPENROUTER_KEY = requireEnv("BANANO_OPENROUTER_KEY");
+const OPENROUTER_KEY = process.env.BANANO_OPENROUTER_KEY || null;
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY || null;
+
+if (!OPENROUTER_KEY && !ANTHROPIC_KEY) {
+  console.error("[banano-standalone] ERROR: At least one of BANANO_OPENROUTER_KEY or ANTHROPIC_API_KEY must be set");
+  process.exit(1);
+}
 
 const CONFIG = {
   watchedChannelIds: envList("WATCHED_CHANNEL_IDS"),
@@ -100,9 +106,10 @@ const CONFIG = {
   vibeFallbacks: [
     "openrouter/meta-llama/llama-3.3-70b-instruct:free",
     "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
+    "anthropic/claude-haiku-4-5",
   ],
   logDir: path.resolve(process.env.LOG_DIR || "./logs"),
-  dataDir: path.resolve(process.env.DATA_DIR || "."),
+  dataDir: path.resolve(process.env.DATA_DIR || "./data"),
 };
 
 if (CONFIG.watchedChannelIds.length === 0) {
@@ -229,34 +236,51 @@ async function runVibeReviewSingle(
   model: string,
 ): Promise<{ raw: string | null; error?: string; retryable?: boolean }> {
   try {
-    const orModel = model.replace(/^openrouter\//, "");
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENROUTER_KEY}`,
-        "HTTP-Referer": "https://monkedao.io",
-        "X-Title": "Banano Vibe Monitor",
-      },
-      body: JSON.stringify({
-        model: orModel,
-        max_tokens: 1024,
-        messages: [{ role: "user", content: prompt }],
-      }),
-      signal: AbortSignal.timeout(CONFIG.vibeReviewTimeoutMs),
-    });
-
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      return { raw: null, error: `OpenRouter ${res.status}: ${body.slice(0, 200)}`, retryable: res.status === 429 || res.status >= 500 };
+    if (model.startsWith("openrouter/")) {
+      if (!OPENROUTER_KEY) return { raw: null, error: "No OpenRouter key configured", retryable: false };
+      const orModel = model.replace(/^openrouter\//, "");
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${OPENROUTER_KEY}`,
+          "HTTP-Referer": "https://monkedao.io",
+          "X-Title": "Banano Vibe Monitor",
+        },
+        body: JSON.stringify({ model: orModel, max_tokens: 1024, messages: [{ role: "user", content: prompt }] }),
+        signal: AbortSignal.timeout(CONFIG.vibeReviewTimeoutMs),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        return { raw: null, error: `OpenRouter ${res.status}: ${body.slice(0, 200)}`, retryable: res.status === 429 || res.status >= 500 };
+      }
+      const data = await res.json() as { choices?: Array<{ message?: { content?: string | null } }> };
+      const text = data.choices?.[0]?.message?.content?.trim();
+      if (!text) return { raw: null, error: "empty response", retryable: true };
+      return { raw: text };
+    } else {
+      // Anthropic
+      if (!ANTHROPIC_KEY) return { raw: null, error: "No Anthropic key configured", retryable: false };
+      const anModel = model.replace(/^anthropic\//, "");
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({ model: anModel, max_tokens: 1024, messages: [{ role: "user", content: prompt }] }),
+        signal: AbortSignal.timeout(CONFIG.vibeReviewTimeoutMs),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        return { raw: null, error: `Anthropic ${res.status}: ${body.slice(0, 200)}`, retryable: res.status === 429 || res.status >= 500 };
+      }
+      const data = await res.json() as { content?: Array<{ type: string; text?: string }> };
+      const text = data.content?.find((b) => b.type === "text")?.text?.trim();
+      if (!text) return { raw: null, error: "empty response", retryable: true };
+      return { raw: text };
     }
-
-    const data = await res.json() as {
-      choices?: Array<{ message?: { content?: string | null } }>;
-    };
-    const text = data.choices?.[0]?.message?.content?.trim();
-    if (!text) return { raw: null, error: "empty response", retryable: true };
-    return { raw: text };
   } catch (err) {
     return { raw: null, error: String(err), retryable: true };
   }
@@ -276,6 +300,48 @@ async function runVibeReview(prompt: string): Promise<{ raw: string | null; erro
     log("WARN", `Model ${model} failed (${lastError}), trying fallback...`);
   }
   return { raw: null, error: `All models failed. Last: ${lastError}` };
+}
+
+// ── Persistent stats ─────────────────────────────────────────────────────────
+
+type VibeStats = {
+  flagged: number;
+  falseAlarms: number;
+  mildResponses: number;
+  escalations: number;
+  cooldownSuppressed: number;
+  dedupeSuppressed: number;
+  reviewErrors: number;
+  startedAt: number;
+  lastSaved: string;
+};
+
+let stats: VibeStats;
+let statsPath: string;
+let statsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function initStats(): void {
+  statsPath = path.join(CONFIG.dataDir, "stats.json");
+  try {
+    if (fs.existsSync(statsPath)) {
+      stats = JSON.parse(fs.readFileSync(statsPath, "utf8")) as VibeStats;
+      return;
+    }
+  } catch { /* */ }
+  stats = {
+    flagged: 0, falseAlarms: 0, mildResponses: 0, escalations: 0,
+    cooldownSuppressed: 0, dedupeSuppressed: 0, reviewErrors: 0,
+    startedAt: Date.now(), lastSaved: new Date().toISOString(),
+  };
+}
+
+function scheduleStatsSave(): void {
+  if (statsTimer) clearTimeout(statsTimer);
+  statsTimer = setTimeout(() => {
+    statsTimer = null;
+    stats.lastSaved = new Date().toISOString();
+    fsp.writeFile(statsPath, JSON.stringify(stats, null, 2), "utf8").catch(() => {});
+  }, 2000);
 }
 
 // ── Core message handler ──────────────────────────────────────────────────────
@@ -306,15 +372,23 @@ async function handleMessage(msg: {
     return;
   }
 
-  // Layer 1: sentiment gate
-  const score = getSentimentScore(content);
-  if (score > CONFIG.sentimentThreshold) {
-    writeJsonlLog("SENTIMENT_PASS", { score, channel: channelId });
-    return;
-  }
+  // Layer 0: known slur pre-filter — bypasses AFINN
+  const hasSlur = containsKnownSlur(content);
 
-  log("INFO", `SENTIMENT_FLAG score=${score} author=${author.username} channel=${channelId} preview="${content.slice(0, 60)}"`);
-  writeJsonlLog("SENTIMENT_FLAG", { score, channel: channelId, author: author.username, authorId: author.id, preview: content.slice(0, 60) });
+  // Layer 1: sentiment gate (skip for non-English or known slurs)
+  const nonEnglish = isLikelyNonEnglish(content);
+  if (!nonEnglish && !hasSlur) {
+    const score = getSentimentScore(content);
+    if (score > CONFIG.sentimentThreshold) {
+      writeJsonlLog("SENTIMENT_PASS", { score, channel: channelId });
+      return;
+    }
+    log("INFO", `SENTIMENT_FLAG score=${score} author=${author.username} channel=${channelId} preview="${content.slice(0, 60)}"`);
+    writeJsonlLog("SENTIMENT_FLAG", { score, channel: channelId, author: author.username, authorId: author.id, preview: content.slice(0, 60) });
+  } else {
+    log("INFO", `SENTIMENT_FLAG score=${hasSlur ? "slur-bypass" : "non-english-bypass"} author=${author.username} channel=${channelId} preview="${content.slice(0, 60)}"`);
+    writeJsonlLog("SENTIMENT_FLAG", { score: hasSlur ? "slur-bypass" : "non-english-bypass", channel: channelId, author: author.username, authorId: author.id, preview: content.slice(0, 60) });
+  }
   stats.flagged++; scheduleStatsSave();
 
   // Layer 2: AI review
@@ -448,20 +522,32 @@ function startGateway(): void {
   let resumeUrl: string | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let messageCount = 0;
+  let awaitingAck = false;
 
   function scheduleReconnect(delayMs = 5000): void {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(connect, delayMs);
   }
 
+  function sendHeartbeat(): void {
+    if (ws?.readyState !== WebSocket.OPEN) return;
+    if (awaitingAck) {
+      log("WARN", "No heartbeat ACK received — zombie connection detected, reconnecting");
+      if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      ws?.close(4000, "Zombie: no heartbeat ACK");
+      return;
+    }
+    awaitingAck = true;
+    ws.send(JSON.stringify({ op: 1, d: sequence }));
+  }
+
   function startHeartbeat(intervalMs: number): void {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
+    awaitingAck = false;
     const jitter = Math.random() * intervalMs;
     setTimeout(() => {
-      ws?.send(JSON.stringify({ op: 1, d: sequence }));
-      heartbeatTimer = setInterval(() => {
-        ws?.send(JSON.stringify({ op: 1, d: sequence }));
-      }, intervalMs);
+      sendHeartbeat();
+      heartbeatTimer = setInterval(sendHeartbeat, intervalMs);
     }, jitter);
   }
 
@@ -487,8 +573,15 @@ function startGateway(): void {
 
       if (payload.s != null) sequence = payload.s;
 
-      // op 1: heartbeat request
-      if (payload.op === 1) ws?.send(JSON.stringify({ op: 1, d: sequence }));
+      // op 1: heartbeat request from server
+      if (payload.op === 1) {
+        awaitingAck = false;
+        ws?.send(JSON.stringify({ op: 1, d: sequence }));
+        awaitingAck = true;
+      }
+
+      // op 11: heartbeat ACK
+      if (payload.op === 11) { awaitingAck = false; }
 
       // op 10: hello
       if (payload.op === 10) {
@@ -540,6 +633,7 @@ function startGateway(): void {
 
     ws.addEventListener("close", (event: CloseEvent) => {
       if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+      awaitingAck = false;
       if (FATAL_CLOSE_CODES.has(event.code)) {
         log("ERROR", `Gateway closed with fatal code ${event.code} — not reconnecting. Check MESSAGE_CONTENT intent in Discord developer portal.`);
         process.exit(1);
@@ -555,48 +649,6 @@ function startGateway(): void {
 }
 
 // ── Startup ───────────────────────────────────────────────────────────────────
-
-// ── Persistent stats ─────────────────────────────────────────────────────────
-
-type VibeStats = {
-  flagged: number;
-  falseAlarms: number;
-  mildResponses: number;
-  escalations: number;
-  cooldownSuppressed: number;
-  dedupeSuppressed: number;
-  reviewErrors: number;
-  startedAt: number;
-  lastSaved: string;
-};
-
-let stats: VibeStats;
-let statsPath: string;
-let statsTimer: ReturnType<typeof setTimeout> | null = null;
-
-function initStats(): void {
-  statsPath = path.join(CONFIG.dataDir, "stats.json");
-  try {
-    if (fs.existsSync(statsPath)) {
-      stats = JSON.parse(fs.readFileSync(statsPath, "utf8")) as VibeStats;
-      return;
-    }
-  } catch { /* */ }
-  stats = {
-    flagged: 0, falseAlarms: 0, mildResponses: 0, escalations: 0,
-    cooldownSuppressed: 0, dedupeSuppressed: 0, reviewErrors: 0,
-    startedAt: Date.now(), lastSaved: new Date().toISOString(),
-  };
-}
-
-function scheduleStatsSave(): void {
-  if (statsTimer) clearTimeout(statsTimer);
-  statsTimer = setTimeout(() => {
-    statsTimer = null;
-    stats.lastSaved = new Date().toISOString();
-    fsp.writeFile(statsPath, JSON.stringify(stats, null, 2), "utf8").catch(() => {});
-  }, 2000);
-}
 
 initViolations(CONFIG.dataDir);
 initStats();
