@@ -1,168 +1,129 @@
 # Banano Vibe Monitor — Standalone Bot
 
-Self-contained Discord vibe moderation bot. No OpenClaw required. Runs anywhere Node.js 18+ is available.
+Self-contained Discord vibe moderation bot. No OpenClaw required.
 
 ---
 
-## What It Does
+## Setup
 
-Two-layer message moderation for Discord channels:
-
-1. **Slur pre-filter** — instant block on known slurs (skips sentiment scoring)
-2. **Sentiment scoring** — local AFINN-based check, free and fast
-3. **AI vibe review** — only runs when sentiment flags a message; uses OpenRouter (free models available) with Anthropic as fallback
-
-When a violation is confirmed:
-- Optionally replies in the flagged channel as Banano
-- Sends a mod alert to a private mod channel with a jump link and strike count
-- Tracks per-user strike history in `data/moderation/violations.json`
-
----
-
-## Requirements
-
-- Node.js 18+
-- npm
-- A Discord bot token with the **Message Content** intent enabled
-
----
-
-## Quick Setup
-
-### 1. Clone / get the code
+### 1. Clone and build
 
 ```bash
-cd banano-bot/standalone
+git clone https://github.com/jpbedoya/banano-vibe-monitor
+cd banano-vibe-monitor/standalone
 npm install
 npm run build
 ```
 
 ### 2. Create a Discord bot
 
-1. Go to https://discord.com/developers/applications
-2. Create a new application → Bot
-3. Under **Privileged Gateway Intents**, enable **Message Content Intent**
-4. Copy the bot token
-5. Invite the bot to your server with these permissions: `Send Messages`, `Read Message History`, `View Channels`
+1. Go to https://discord.com/developers/applications → **New Application** → **Bot**
+2. Under **Privileged Gateway Intents**, enable **Message Content Intent**
+3. Copy the **bot token** — you'll need it in the next step
+4. Invite the bot to your server:
+   ```
+   https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=68608&scope=bot
+   ```
+   Required permissions: `Send Messages`, `Read Message History`, `View Channels`
 
-Invite URL format:
-```
-https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=68608&scope=bot
-```
-
-### 3. Configure environment
-
-Copy `.env.example` to `.env` and fill in the values:
+### 3. Configure
 
 ```bash
 cp .env.example .env
+nano .env
 ```
+
+Minimum required:
 
 ```env
-# Required
 DISCORD_TOKEN=your_bot_token_here
-
-# AI provider (at least one required)
-BANANO_OPENROUTER_KEY=your_openrouter_key   # Free models available at openrouter.ai
-ANTHROPIC_API_KEY=your_anthropic_key         # Fallback / optional
-
-# Channels
-WATCHED_CHANNEL_IDS=874638621368533015,886669323681275905   # Comma-separated IDs to monitor
-MOD_CHANNEL_ID=your_mod_channel_id                          # Where alerts get sent
-
-# Tuning (optional — defaults shown)
-SENTIMENT_THRESHOLD=-2          # Lower = less sensitive (default: -2)
-MAX_RECENT_MESSAGES=10          # Context messages sent to AI for review
-COOLDOWN_MS=30000               # Per-channel cooldown between responses (ms)
-DEDUPE_WINDOW_MS=60000          # Deduplication window (ms)
-MOD_ESCALATION_MIN_SEVERITY=high   # low | medium | high
-HIGH_SEVERITY_PUBLIC_REPLY=true    # Reply publicly for high-severity violations
-VIBE_REVIEW_TIMEOUT_MS=30000       # AI review timeout per call (ms)
-VIBE_MODEL=                        # Override primary model (default: openrouter/google/gemma-3-27b-it:free)
+BANANO_OPENROUTER_KEY=your_openrouter_key   # free key at openrouter.ai
+WATCHED_CHANNEL_IDS=123456789,987654321     # comma-separated channel IDs to monitor
+MOD_CHANNEL_ID=111222333                    # channel where alerts get posted
 ```
 
-### 4. Run the bot
+### 4. Run it
 
 ```bash
 npm start
 ```
 
-Or for development (auto-recompile on changes):
-```bash
-npm run dev
-# in another terminal:
-npm start
+You should see:
+```
+[banano-vibe] Gateway connected
+[banano-vibe] Gateway ready
+[banano-vibe] Active v1.0.0 | watching: 123456789,987654321 | mod: 111222333
 ```
 
 ---
 
-## Running as a Service (Production)
+## Keep it running (production)
 
-Using PM2:
+Install PM2 once:
 ```bash
 npm install -g pm2
+```
+
+Start the bot:
+```bash
 pm2 start dist/bot.js --name banano-vibe
-pm2 save
-pm2 startup   # follow the printed command to auto-start on reboot
+pm2 save        # persist across reboots
+pm2 startup     # prints a command — run it to enable auto-start on reboot
 ```
 
-Using systemd (Linux):
-```ini
-[Unit]
-Description=Banano Vibe Monitor
-After=network.target
-
-[Service]
-WorkingDirectory=/path/to/banano-bot/standalone
-ExecStart=/usr/bin/node dist/bot.js
-Restart=always
-RestartSec=10
-Environment=NODE_ENV=production
-
-[Install]
-WantedBy=multi-user.target
+Useful commands:
+```bash
+pm2 logs banano-vibe      # live logs
+pm2 status                # check it's running
+pm2 restart banano-vibe   # after config changes
 ```
 
 ---
 
-## Data Files
+## Update
 
-All runtime data is written to `standalone/data/`:
-
-| Path | Contents |
-|------|----------|
-| `data/stats.json` | Message counts, flag counts, escalations |
-| `data/moderation/violations.json` | Per-user strike history |
-| `data/logs/banano-vibe-YYYY-MM-DD.jsonl` | Daily decision log (JSONL) |
+```bash
+cd banano-vibe-monitor
+git pull
+cd standalone && npm install && npm run build
+pm2 restart banano-vibe
+```
 
 ---
 
-## AI Model Config
+## Full config reference
 
-The bot uses a fallback chain. If the primary model fails, it automatically tries the next:
+All settings go in `.env`. Only `DISCORD_TOKEN` is strictly required — everything else has a default.
 
-1. `VIBE_MODEL` (or default: `openrouter/google/gemma-3-27b-it:free`)
-2. `openrouter/meta-llama/llama-3.3-70b-instruct:free`
-3. `openrouter/nvidia/nemotron-3-nano-30b-a3b:free`
-4. `anthropic/claude-haiku-4-5` (requires `ANTHROPIC_API_KEY`)
-
-Free OpenRouter models are sufficient for most use cases. Get a key at https://openrouter.ai.
+| Variable | Default | Description |
+|---|---|---|
+| `DISCORD_TOKEN` | — | Bot token (required) |
+| `BANANO_OPENROUTER_KEY` | — | OpenRouter API key (primary AI provider) |
+| `ANTHROPIC_API_KEY` | — | Anthropic key (fallback AI provider) |
+| `WATCHED_CHANNEL_IDS` | — | Comma-separated channel IDs to monitor |
+| `MOD_CHANNEL_ID` | — | Channel for escalation alerts |
+| `SENTIMENT_THRESHOLD` | `-2` | AFINN score cutoff — lower = less sensitive |
+| `MOD_ESCALATION_MIN_SEVERITY` | `high` | Minimum severity to post to mod channel (`low`/`medium`/`high`) |
+| `HIGH_SEVERITY_PUBLIC_REPLY` | `true` | Reply in-channel for high severity violations |
+| `VIBE_MODEL` | `openrouter/google/gemma-3-27b-it:free` | Primary AI model |
+| `MAX_RECENT_MESSAGES` | `10` | Message context sent to AI |
+| `COOLDOWN_MS` | `30000` | Per-channel cooldown between responses (ms) |
+| `DEDUPE_WINDOW_MS` | `60000` | Deduplication window (ms) |
+| `VIBE_REVIEW_TIMEOUT_MS` | `30000` | AI review timeout (ms) |
 
 ---
 
 ## Troubleshooting
 
 **Bot connects but never triggers**
-- Check `WATCHED_CHANNEL_IDS` — must match the channel IDs exactly (no spaces)
-- Verify the bot has `View Channels` + `Read Message History` in those channels
-- Check that **Message Content Intent** is enabled in the Discord developer portal
+- Double-check `WATCHED_CHANNEL_IDS` — exact IDs, no spaces
+- Confirm the bot has `View Channels` + `Read Message History` in those channels
 
-**Fatal close code 4014**
-- Message Content Intent not enabled. Go to Discord Developer Portal → Bot → Privileged Gateway Intents → enable Message Content Intent.
+**Fatal error: close code 4014**
+- Message Content Intent isn't enabled. Discord Developer Portal → your app → Bot → Privileged Gateway Intents → turn on Message Content Intent
 
-**Vibe reviews always fail**
-- Check `BANANO_OPENROUTER_KEY` is set and valid
-- Test the key at https://openrouter.ai
+**Vibe reviews fail**
+- Make sure `BANANO_OPENROUTER_KEY` is set. Get a free key at https://openrouter.ai
 
-**Bot replies but no mod alerts**
+**No mod alerts**
 - Check `MOD_CHANNEL_ID` is set and the bot has `Send Messages` in that channel
