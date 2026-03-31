@@ -1044,7 +1044,7 @@ async function processVibeMessage(
     result.suggestedResponse && (!isHighSeverity || config.highSeverityPublicReply);
 
   if (shouldReplyPublicly) {
-    await sendDiscord(config.discordToken, discordChannelId, result.suggestedResponse!);
+    await sendDiscord(config.discordToken, discordChannelId, result.suggestedResponse!, messageId);
     stats.mildResponses++;
     scheduleStatsSave();
     logDecision("MILD_RESPONSE", {
