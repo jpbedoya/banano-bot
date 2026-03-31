@@ -1,0 +1,186 @@
+# DEPLOY.md — MonkeDAO Production Deployment
+
+> How the standalone vibe bot is deployed and running on the MonkeDAO server.
+> For general setup from scratch, see [README.md](./README.md).
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────┐     ┌─────────────────────────┐
+│   OpenClaw Gateway   │     │  Standalone Vibe Bot     │
+│                      │     │  (PM2 → systemd)         │
+│  - Telegram bot      │     │                          │
+│  - Discord bot       │     │  - Own Discord gateway   │
+│  - Banano AI agent   │     │  - Watches #bot-patrol   │
+│                      │     │  - Posts to #banano-admin │
+│  Same Discord token  │     │  Same Discord token      │
+└──────────┬───────────┘     └──────────┬───────────────┘
+           │                            │
+           └────────────────────────────┘
+                        │
+              Discord API (shared bot)
+```
+
+**Why standalone?** The OpenClaw plugin version routed all messages through OpenClaw's gateway, causing double-replies, rate limits, and coupling to gateway restarts. The standalone bot connects directly to Discord's gateway — independent, faster, no middleman.
+
+**Shared token:** Both OpenClaw and the standalone bot use the same Discord bot token. Discord allows multiple gateway connections (sharding). To prevent double-replies, `#bot-patrol` is set to `requireMention: true` in OpenClaw's config so only the standalone bot handles passive monitoring there.
+
+---
+
+## Server Details
+
+| Item | Value |
+|---|---|
+| **Server** | `bonano-openclaw` |
+| **Bot path** | `/root/.openclaw/workspace/code/banano-vibe-monitor/standalone/` |
+| **Config** | `/root/.openclaw/workspace/code/banano-vibe-monitor/standalone/.env` |
+| **Prompt** | `/root/.openclaw/workspace/code/banano-vibe-monitor/standalone/prompt.txt` |
+| **PM2 process name** | `banano-vibe` |
+| **PM2 logs** | `/root/.pm2/logs/banano-vibe-out.log` and `banano-vibe-error.log` |
+| **Systemd service** | `pm2-root` |
+
+---
+
+## Discord Channel IDs
+
+| Channel | ID | Purpose |
+|---|---|---|
+| `#bot-patrol-test` | `1485792688677589144` | Watched channel (messages monitored) |
+| `#banano-admin` | `1485808518719213738` | Mod escalation alerts posted here |
+| MonkeDAO guild | `874638621368533012` | — |
+
+---
+
+## Current .env Configuration
+
+```env
+DISCORD_TOKEN=<same as OpenClaw — see openclaw.json>
+BANANO_OPENROUTER_KEY=<OpenRouter API key>
+WATCHED_CHANNEL_IDS=1485792688677589144
+MOD_CHANNEL_ID=1485808518719213738
+SENTIMENT_THRESHOLD=-2
+MOD_ESCALATION_MIN_SEVERITY=low
+HIGH_SEVERITY_PUBLIC_REPLY=true
+VIBE_MODEL=openrouter/google/gemma-3-27b-it:free
+```
+
+> **Note:** `.env` is gitignored. If the server dies, you need to recreate it from the above template. The Discord token and OpenRouter key are stored in OpenClaw's config (`/root/.openclaw/openclaw.json` and `/root/.openclaw/agents/main/agent/auth-profiles.json`).
+
+---
+
+## Common Operations
+
+### Check status
+```bash
+pm2 status
+pm2 logs banano-vibe --lines 30
+```
+
+### Restart the bot
+```bash
+pm2 restart banano-vibe
+```
+
+### Pull updates and deploy
+```bash
+cd /root/.openclaw/workspace/code/banano-vibe-monitor
+git pull origin main
+cd standalone && npm install && npm run build
+pm2 restart banano-vibe
+```
+
+### Edit the AI prompt
+```bash
+nano /root/.openclaw/workspace/code/banano-vibe-monitor/standalone/prompt.txt
+pm2 restart banano-vibe
+```
+
+### View recent activity
+```bash
+# Last 50 lines of output
+pm2 logs banano-vibe --lines 50 --nostream
+
+# Errors only
+cat /root/.pm2/logs/banano-vibe-error.log | tail -20
+```
+
+### If the bot is down and PM2 is empty
+```bash
+# Check if PM2 systemd service is running
+systemctl status pm2-root
+
+# If inactive:
+systemctl start pm2-root
+
+# If PM2 is running but process list is empty:
+cd /root/.openclaw/workspace/code/banano-vibe-monitor/standalone
+pm2 start dist/bot.js --name banano-vibe
+pm2 save
+```
+
+---
+
+## OpenClaw Config (must stay in sync)
+
+The standalone bot and OpenClaw share a Discord token. To prevent double-replies in `#bot-patrol`:
+
+```jsonc
+// In openclaw.json → channels.discord.guilds['874638621368533012'].channels
+"1485792688677589144": {
+  "requireMention": true   // ← must be true while standalone bot is active
+}
+```
+
+If `requireMention` is set to `false`, both OpenClaw and the standalone bot will respond to every message in that channel.
+
+---
+
+## Known Issues & Gotchas
+
+### PM2 dies on OpenClaw restart
+**Problem:** When OpenClaw restarts (config change, update, etc.), it can kill the PM2 daemon if PM2 isn't running as a systemd service.
+
+**Fix:** Ensure the systemd service is active:
+```bash
+systemctl status pm2-root   # should say "active (running)"
+systemctl start pm2-root    # if inactive
+```
+
+The `pm2 startup` command creates the service file, but you still need to `systemctl start pm2-root` the first time.
+
+### Free models get rate-limited (429)
+**Problem:** `google/gemma-3-27b-it:free` and `meta-llama/llama-3.3-70b-instruct:free` frequently return 429 errors from OpenRouter.
+
+**Effect:** Bot falls back to `nvidia/nemotron-3-nano-30b-a3b:free` which is more lenient on severity ratings (tends to rate things as "medium" instead of "high").
+
+**Mitigation options:**
+- Use a paid model (set `VIBE_MODEL` in `.env`)
+- Accept the fallback behavior — the bot still catches and responds, just classifies less aggressively
+
+### .env is not in the repo
+The `.env` file is gitignored. If the server is rebuilt from scratch, recreate it using the template above. Token values can be found in OpenClaw's config files.
+
+### Bot doesn't see messages in new channels
+The bot only watches channels listed in `WATCHED_CHANNEL_IDS`. To add a channel:
+1. Add the channel ID to `WATCHED_CHANNEL_IDS` in `.env` (comma-separated)
+2. Ensure the bot has `View Channels` + `Read Message History` in that channel
+3. `pm2 restart banano-vibe`
+
+---
+
+## Adding to Production (new channels)
+
+When ready to move beyond `#bot-patrol-test` to real MonkeDAO channels:
+
+1. Get the channel IDs for the channels to monitor
+2. Add them to `WATCHED_CHANNEL_IDS` in `.env`
+3. Consider setting `MOD_ESCALATION_MIN_SEVERITY=high` for production (currently `low` for testing)
+4. Verify the bot has permissions in those channels
+5. `pm2 restart banano-vibe`
+6. Update OpenClaw config to set `requireMention: true` for any channels the standalone bot watches
+
+---
+
+*Last updated: March 31, 2026*
