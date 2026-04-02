@@ -119,6 +119,63 @@ function loadVibeCheckPrompt(dir: string): string {
 
 let VIBE_CHECK_PROMPT = DEFAULT_VIBE_CHECK_PROMPT;
 
+// ── Notify template ─────────────────────────────────────────────────────────
+
+const DEFAULT_NOTIFY_TEMPLATE = [
+  "Official Community Moderation Notice",
+  "",
+  "This serves as formal notice that {MEMBER} has been placed on timeout for {DURATION} due to a violation of the MonkeDAO Community Guidelines and/or Code of Conduct.",
+  "",
+  "This constitutes the member's {STRIKE_ORDINAL} recorded violation. As a reminder, MonkeDAO operates under a strict three-strike moderation policy, structured as follows:",
+  "",
+  "\u2022 1st violation: 1-hour timeout",
+  "\u2022 2nd violation: 24-hour timeout",
+  "\u2022 3rd violation: 7-day timeout",
+  "",
+  "All related incidents have been formally documented.",
+  "",
+  "MonkeDAO maintains a zero-tolerance stance toward behavior that compromises the safety, respect, and integrity of our community. Continued non-compliance following repeated warnings and timeouts may result in further enforcement action, including a permanent removal from the server.",
+  "",
+  "Members are strongly encouraged to review the following:",
+  "",
+  "\u2022 MonkeDAO Community Guidelines: https://tinyurl.com/mdcomguide",
+  "",
+  "\u2022 Code of Conduct: https://monkedao.io/code-of-conduct/",
+  "",
+  "We appreciate the community's collective effort in maintaining a respectful and constructive environment for all.",
+].join("\n");
+
+function loadNotifyTemplate(dir: string): string {
+  const templatePath = path.join(dir, "notify-template.txt");
+  try {
+    if (fs.existsSync(templatePath)) {
+      const content = fs.readFileSync(templatePath, "utf8").trim();
+      if (content) {
+        logger.info(`Loaded custom notify template from ${templatePath}`);
+        return content;
+      }
+    }
+  } catch (err) {
+    logger.warn(`Failed to load notify-template.txt: ${err} — using default`);
+  }
+  return DEFAULT_NOTIFY_TEMPLATE;
+}
+
+let NOTIFY_TEMPLATE = DEFAULT_NOTIFY_TEMPLATE;
+
+function ordinal(n: number): string {
+  const s = ["th", "st", "nd", "rd"];
+  const v = n % 100;
+  return n + (s[(v - 20) % 10] ?? s[v] ?? s[0]);
+}
+
+function buildNotifyMessage(template: string, member: string, duration: string, strikeCount: number): string {
+  return template
+    .replace(/\{MEMBER\}/g, member)
+    .replace(/\{DURATION\}/g, duration)
+    .replace(/\{STRIKE_ORDINAL\}/g, ordinal(strikeCount));
+}
+
 // ── Inline vibe-check ───────────────────────────────────────────────────────
 
 type VibeResult = {
@@ -913,7 +970,7 @@ function scheduleStatsSave(): void {
 //
 // Only users listed in MODERATOR_IDS can run these commands.
 
-const MOD_COMMAND_RE = /^!(warn|strike|strikes|help)\b/i;
+const MOD_COMMAND_RE = /^!(warn|strike|strikes|notify|help)\b/i;
 
 async function processModCommand(
   config: VibeConfig,
@@ -938,6 +995,7 @@ async function processModCommand(
         "`!warn @user <reason>` — issue a public warning and record a strike",
         "`!strike @user <reason>` — alias for !warn",
         "`!strikes @user` — show strike count for a user",
+        "`!notify @user` — post formal moderation notice (uses strike count to set duration)",
       ].join("\n"),
     );
     return true;
@@ -1008,6 +1066,67 @@ async function processModCommand(
     }
 
     logger.info(`MOD_WARN issuer=${msg.author.username} target=${targetName} reason=${reason}`);
+    return true;
+  }
+
+  if (cmd === "!notify") {
+    const mentionMatch = content.match(/^!\w+\s+<@!?(\d+)>/);
+    const plainMatch = content.match(/^!\w+\s+(\S+)/);
+    let targetId: string | null = mentionMatch?.[1] ?? null;
+    let targetName: string = plainMatch?.[1]?.replace(/^@/, "") ?? "";
+
+    if (!targetId && !targetName) {
+      await sendDiscord(config.discordToken, msg.channel_id, `Usage: \`!notify @user\``, msg.id);
+      return true;
+    }
+
+    // Look up existing strikes
+    const record = targetId
+      ? ledger.members[targetId]
+      : Object.values(ledger.members).find(
+          (m) => m.username.toLowerCase() === targetName.toLowerCase(),
+        );
+
+    const strikes = record?.strikes ?? 0;
+    const memberTag = targetId ? `<@${targetId}>` : targetName;
+
+    // Map strike count to duration
+    const durationMap: Record<number, string> = {
+      1: "1 hour",
+      2: "24 hours",
+      3: "7 days",
+    };
+    const duration = durationMap[strikes] ?? (strikes > 3 ? "indefinite (pending review)" : "N/A");
+
+    if (strikes === 0) {
+      await sendDiscord(
+        config.discordToken,
+        msg.channel_id,
+        `No violations on record for ${memberTag}. Issue a \`!warn\` first to record a strike before sending a formal notice.`,
+        msg.id,
+      );
+      return true;
+    }
+
+    const notice = buildNotifyMessage(NOTIFY_TEMPLATE, memberTag, duration, strikes);
+    await sendDiscord(config.discordToken, msg.channel_id, notice);
+
+    // Log to mod channel
+    if (config.modChannelId && config.modChannelId !== msg.channel_id) {
+      await sendDiscord(
+        config.discordToken,
+        config.modChannelId,
+        [
+          `\ud83d\udcdc **Formal notice issued** by ${escapeDiscordMarkdown(msg.author.username)}`,
+          `**Target:** ${memberTag}${targetId ? ` (${targetId})` : ""}`,
+          `**Strike:** #${strikes}`,
+          `**Duration:** ${duration}`,
+          `**Channel:** <#${msg.channel_id}>`,
+        ].join("\n"),
+      );
+    }
+
+    logger.info(`MOD_NOTIFY issuer=${msg.author.username} target=${memberTag} strike=${strikes} duration=${duration}`);
     return true;
   }
 
@@ -1309,6 +1428,7 @@ function main(): void {
 
   // Initialize subsystems
   VIBE_CHECK_PROMPT = loadVibeCheckPrompt(process.cwd());
+  NOTIFY_TEMPLATE = loadNotifyTemplate(process.cwd());
   initVibeLog(dataDir);
   initViolations(dataDir);
   initStats(dataDir);

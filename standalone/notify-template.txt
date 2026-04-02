@@ -1,0 +1,21 @@
+Official Community Moderation Notice
+
+This serves as formal notice that {MEMBER} has been placed on timeout for {DURATION} due to a violation of the MonkeDAO Community Guidelines and/or Code of Conduct.
+
+This constitutes the member's {STRIKE_ORDINAL} recorded violation. As a reminder, MonkeDAO operates under a strict three-strike moderation policy, structured as follows:
+
+• 1st violation: 1-hour timeout
+• 2nd violation: 24-hour timeout
+• 3rd violation: 7-day timeout
+
+All related incidents have been formally documented.
+
+MonkeDAO maintains a zero-tolerance stance toward behavior that compromises the safety, respect, and integrity of our community. Continued non-compliance following repeated warnings and timeouts may result in further enforcement action, including a permanent removal from the server.
+
+Members are strongly encouraged to review the following:
+
+• MonkeDAO Community Guidelines: https://tinyurl.com/mdcomguide
+
+• Code of Conduct: https://monkedao.io/code-of-conduct/
+
+We appreciate the community's collective effort in maintaining a respectful and constructive environment for all.
