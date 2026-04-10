@@ -50,6 +50,101 @@ const NON_LATIN_SLURS = [
   '씨발', '개새끼', '좆', '병신', '미친놈', '닥쳐',
 ];
 
+// ── Benign profanity patterns ────────────────────────────────────────────────
+// These are words/expressions that ARE negative in strict sentiment scoring
+// but are commonly used in benign ways (sports banter, reactions, frustration).
+// If a message's negativity comes ONLY from these, skip vibe check.
+
+const BENIGN_PROFANITY_PATTERNS = [
+  // Single-word reactions (often emoji-adjacent)
+  /\bwtf\b/i,
+  /\bwtf\b.*[\U0001F602-\U0001F92F]/i,  // wtf 😂 style
+  /\bffs\b/i,
+  /\bugh\b/i,
+  /\bdamn\b/i,
+  /\bdammit\b/i,
+  /\bhells?\b/i,          // "hell yeah" / "hell no" / "hell naww"
+  /\bhella\b/i,           // colloquial "very"
+
+  // Common intensifiers in benign context
+  /\bfucking?\b/i,        // "fucking awesome" vs "you fucking idiot" (targeted)
+  /\baffing\b/i,
+  /\bdamn\s+good\b/i,
+  /\bdamn\s+cool\b/i,
+
+  // Sports/slang expressions
+  /\brigged\b/i,          // "sports are rigged" - common trope
+  /\bniggaz?\b/i,         // N-word used as greeting/in-group (still pass through Layer 0)
+  /\bstacked\b/i,         // positive usage
+  /\bdegen\b/i,           // positive in crypto context
+
+  // General complaints without targets
+  /\b(wtf|holy|omg)\s+(shit|hell|crap)/i,
+  /\b(cmon|c'mon|come\s+on)\b/i,
+
+  // Emoji/combo patterns
+  /[\U0001F644][\U0001F602]/,  // 🙄😂 style combos
+  /\bfucking+\b/i,        // "fuuuucking" stretched
+];
+
+// Profanity patterns that indicate TRUE negativity (with target)
+// These override the benign list
+const TARGETED_PROFANITY_PATTERNS = [
+  /\byou\s+(fucking?|goddamn?|motherfucking?)\b/i,
+  /\b(fucking?|motherfucking?)\s+(you|yours?|idiot|moron|retard|stupid)/i,
+  /\bshut\s+(the\s+)?(fuck|hell|up)\b/i,
+  /\b(fuck|shit)\s+(you|off|u)\b/i,
+  /\bgo\s+(fuck|shit)\s+(yourself|away)\b/i,
+];
+
+// ── Benign profanity helpers ────────────────────────────────────────────────
+
+function containsTargetedProfanity(text: string): boolean {
+  for (const pattern of TARGETED_PROFANITY_PATTERNS) {
+    if (pattern.test(text)) return true;
+  }
+  return false;
+}
+
+function containsBenignProfanity(text: string): { benign: boolean; score: number } {
+  let matchedBenign = false;
+  let matchedTargeted = false;
+  
+  for (const pattern of BENIGN_PROFANITY_PATTERNS) {
+    if (pattern.test(text)) {
+      matchedBenign = true;
+      break;
+    }
+  }
+  
+  // If there's targeted profanity, it's NOT benign even if it has benign patterns
+  if (containsTargetedProfanity(text)) {
+    matchedTargeted = true;
+  }
+  
+  // Return score indicating benign-ness (0-10 scale)
+  let score = 0;
+  if (matchedBenign && !matchedTargeted) score = 10;
+  else if (matchedBenign && matchedTargeted) score = 3; // mixed - be cautious
+  else if (matchedTargeted) score = 0;
+  
+  return { benign: matchedBenign && !matchedTargeted, score };
+}
+
+function shouldBypassSentimentGate(text: string): boolean {
+  // Check benign profanity - bypass if score is high (10 = purely benign)
+  const { benign, score } = containsBenignProfanity(text);
+  
+  // If clearly benign profanity only, skip sentiment gate
+  if (score >= 10) {
+    return true;
+  }
+  
+  // If has benign elements but also potentially targeted, don't bypass
+  // This handles "you fucking idiot" vs "that's fucking cool"
+  return false;
+}
+
 function containsKnownSlur(text: string): boolean {
   for (const pattern of LATIN_SLUR_PATTERNS) {
     if (pattern.test(text)) return true;
@@ -1223,7 +1318,9 @@ async function processVibeMessage(
 
   // ── Layer 1: Sentiment gate
   const nonEnglish = isLikelyNonEnglish(content);
-  if (!nonEnglish && !hasSlur) {
+
+  // Check for benign profanity bypass BEFORE scoring
+  if (!nonEnglish && !hasSlur && !shouldBypassSentimentGate(content)) {
     const score = getSentimentScore(content);
     if (score > config.sentimentThreshold) {
       logDecision("SENTIMENT_PASS", { score, threshold: config.sentimentThreshold, channel: discordChannelId });
@@ -1232,6 +1329,10 @@ async function processVibeMessage(
     stats.flagged++;
     scheduleStatsSave();
     logDecision("SENTIMENT_FLAG", { score, threshold: config.sentimentThreshold, channel: discordChannelId, preview: content.slice(0, 60), author: authorName, authorId });
+  } else if (shouldBypassSentimentGate(content)) {
+    // Benign profanity only — skip vibe check entirely
+    logDecision("SENTIMENT_PASS", { reason: "benign_profanity", channel: discordChannelId });
+    return;
   } else {
     stats.flagged++;
     scheduleStatsSave();
