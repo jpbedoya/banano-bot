@@ -1,0 +1,3 @@
+DISCORD_TOKEN=your_token_here
+BANANO_OPENROUTER_KEY=your_key_here
+MINIMAX_API_KEY=your_key_here

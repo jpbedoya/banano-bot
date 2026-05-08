@@ -85,6 +85,13 @@ const BENIGN_PROFANITY_PATTERNS = [
   // Emoji/combo patterns
   /[\U0001F644][\U0001F602]/,  // 🙄😂 style combos
   /\bfucking+\b/i,        // "fuuuucking" stretched
+
+  // Workplace/joke expressions — not real threats
+  /\bpull\s+a?\s*fire\s*alarm\b/i,  // "pull a fire alarm" — workplace boredom joke
+  /\bjust\s+one\s+more\b/i,            // "just one more round" — gaming addiction joke
+  /\bmy\s+brain\s*is\s*fried\b/i,    // "my brain is fried" — casual exhaustion
+  /\bshould\s+go\s+to\s+sleep\b/i,   // "should go to sleep but..." — degen culture
+  /\bugly\b/i,                          // "ugly shoes" / "ugly sweater" — casual descriptive humor
 ];
 
 // Profanity patterns that indicate TRUE negativity (with target)
@@ -438,6 +445,7 @@ type VibeConfig = {
   discordToken: string;
   openRouterKey: string | null;
   anthropicKey: string | null;
+  minimaxKey: string | null;
   watchedChannelIds: string[];
   modChannelId: string | null;
   moderatorIds: string[];
@@ -465,6 +473,7 @@ function resolveConfig(): VibeConfig {
     discordToken: token,
     openRouterKey: process.env.BANANO_OPENROUTER_KEY || null,
     anthropicKey: process.env.ANTHROPIC_API_KEY || null,
+    minimaxKey: process.env.MINIMAX_API_KEY || null,
     watchedChannelIds: (process.env.WATCHED_CHANNEL_IDS || "")
       .split(",")
       .map((s) => s.trim())
@@ -474,7 +483,7 @@ function resolveConfig(): VibeConfig {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
-    sentimentThreshold: Number(process.env.SENTIMENT_THRESHOLD) || -2,
+    sentimentThreshold: Number(process.env.SENTIMENT_THRESHOLD) || -5,
     maxRecentMessages: Number(process.env.MAX_RECENT_MESSAGES) || 10,
     cooldownMs: Number(process.env.COOLDOWN_MS) || 10_000,
     dedupeWindowMs: Number(process.env.DEDUPE_WINDOW_MS) || 60_000,
@@ -885,11 +894,9 @@ function startDirectGateway(
 
 // ── AI vibe review — multi-provider with fallback ───────────────────────────
 
-const DEFAULT_VIBE_MODEL = "openrouter/google/gemma-3-27b-it:free";
+const DEFAULT_VIBE_MODEL = "minimax/MiniMax-M2.7";
 const DEFAULT_VIBE_FALLBACKS = [
-  "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-  "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
-  "anthropic/claude-haiku-4-5",
+  "minimax/MiniMax-M2.7-highspeed",
 ];
 
 function isOpenRouterModel(m: string): boolean {
@@ -944,6 +951,41 @@ async function runVibeReviewSingle(
         logger.warn(`OpenRouter empty response — finish_reason: ${choice?.finish_reason ?? "unknown"}`);
         return { raw: null, error: "empty response from OpenRouter", retryable: true };
       }
+      return { raw: text };
+
+    } else if (vibeModel.startsWith("minimax/")) {
+      const minimaxKey = config.minimaxKey;
+      if (!minimaxKey) return { raw: null, error: "No MiniMax API key configured" };
+
+      const model = vibeModel.replace(/^minimax\//, "");
+      const res = await fetch("https://api.minimax.io/anthropic/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": minimaxKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 1024,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: AbortSignal.timeout(config.vibeReviewTimeoutMs),
+      });
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        const retryable = res.status === 429 || res.status >= 500;
+        return { raw: null, error: `MiniMax API ${res.status}: ${body.slice(0, 200)}`, retryable };
+      }
+
+
+      const data = (await res.json()) as {
+        content?: Array<{ type: string; text?: string }>;
+      };
+
+      const text = data.content?.find((b) => b.type === "text")?.text?.trim();
+      if (!text) return { raw: null, error: "empty response from MiniMax", retryable: true };
       return { raw: text };
 
     } else {
