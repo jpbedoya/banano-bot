@@ -198,6 +198,23 @@ function loadDotEnv(pluginDir: string): void {
   } catch { /* best-effort */ }
 }
 
+function resolveMinimaxKey(_config: OpenClawConfig): string | null {
+  // 1. Dedicated env var — set via plugin .env or system env
+  if (process.env.BANANO_MINIMAX_KEY) return process.env.BANANO_MINIMAX_KEY;
+
+  // 2. Fall back to OpenClaw env (MINIMAX_API_KEY)
+  if (process.env.MINIMAX_API_KEY) return process.env.MINIMAX_API_KEY;
+
+  // 3. Fall back to OpenClaw auth-profiles store
+  for (const profile of Object.values(resolveAuthProfiles())) {
+    if (profile.provider === "minimax") {
+      if (typeof profile.key === "string") return profile.key;
+      if (typeof profile.token === "string") return profile.token;
+    }
+  }
+  return null;
+}
+
 function resolveOpenRouterKey(_config: OpenClawConfig): string | null {
   // 1. Dedicated env var — set via plugin .env or system env
   if (process.env.BANANO_OPENROUTER_KEY) return process.env.BANANO_OPENROUTER_KEY;
@@ -739,7 +756,7 @@ const plugin = {
   id: "banano-vibe",
   name: "Banano Vibe Monitor",
   description: "Two-layer vibe moderation for Discord: local sentiment gate + isolated AI review.",
-  version: "2.3.1",
+  version: "2.3.2",
 
   register(api: PluginApi) {
     // Load .env first (needed for enabled check to work with env-driven config)
@@ -787,7 +804,7 @@ const plugin = {
     initViolations(stateDir);
 
     logger.info(
-      `[banano-vibe] Active v2.3.1 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
+      `[banano-vibe] Active v2.3.2 | watching: ${config.watchedChannelIds.join(", ") || "none"} | ` +
         `mod: ${config.modChannelId || "none"} | threshold: ${config.sentimentThreshold}`,
     );
 
@@ -837,7 +854,7 @@ const plugin = {
       description: "Show Banano vibe monitor status",
       handler: () => ({
         text: [
-          "🦍 **Banano Vibe Monitor v2.3.1**",
+          "🦍 **Banano Vibe Monitor v2.3.2**",
           `Enabled: ${config.enabled}`,
           `Watching: ${config.watchedChannelIds.join(", ") || "none"}`,
           `Mod channel: ${config.modChannelId || "none"}`,
@@ -974,6 +991,40 @@ const plugin = {
             logger.warn(`[banano-vibe] OpenRouter empty response — finish_reason: ${choice?.finish_reason ?? "unknown"}`);
             return { raw: null, error: "empty response from OpenRouter", retryable: true };
           }
+          return { raw: text };
+
+        } else if (vibeModel.startsWith("minimax/")) {
+          const minimaxKey = resolveMinimaxKey(api.config);
+          if (!minimaxKey) return { raw: null, error: "No MiniMax API key configured" };
+
+          const model = vibeModel.replace(/^minimax\//, "");
+          const res = await fetch("https://api.minimax.io/anthropic/v1/messages", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-api-key": minimaxKey,
+              "anthropic-version": "2023-06-01",
+            },
+            body: JSON.stringify({
+              model,
+              max_tokens: 1024,
+              messages: [{ role: "user", content: prompt }],
+            }),
+            signal: AbortSignal.timeout(config.vibeReviewTimeoutMs),
+          });
+
+          if (!res.ok) {
+            const body = await res.text().catch(() => "");
+            const retryable = res.status === 429 || res.status >= 500;
+            return { raw: null, error: `MiniMax API ${res.status}: ${body.slice(0, 200)}`, retryable };
+          }
+
+          const data = await res.json() as {
+            content?: Array<{ type: string; text?: string }>;
+          };
+
+          const text = data.content?.find((b) => b.type === "text")?.text?.trim();
+          if (!text) return { raw: null, error: "empty response from MiniMax", retryable: true };
           return { raw: text };
 
         } else {
@@ -1379,28 +1430,14 @@ const plugin = {
 
     logger.info("[banano-vibe] message_received hook registered — watching all messages in watched channels");
 
-    // ── Direct Discord Gateway — primary inbound path ────────────────────
-    // Bypasses OpenClaw's requireMention filter so ALL messages in watched
-    // channels are processed, regardless of who sent them.
-    // The message_received hook above remains as a secondary path for
-    // messages that do reach OpenClaw's pipeline; tryClaimMessage()
-    // deduplication prevents double-processing.
-    const gateway = startDirectGateway(
-      token,
-      config.watchedChannelIds,
-      async (msg: DiscordMessageEvent) => {
-        await processVibeMessage(
-          msg.channel_id,
-          msg.content,
-          msg.author.id,
-          msg.author.username,
-          msg.id,
-          msg.guild_id,
-        );
-      },
-      logger,
-    );
-    setActiveGateway(gateway);
+    // ── Direct Discord Gateway DISABLED ──────────────────────────────────
+    // Previously opened a second WebSocket to Discord using the same bot token
+    // as OpenClaw's main Discord channel. During gateway restart storms this
+    // caused token bans (1000+ connections). The message_received hook above
+    // is sufficient when requireMention is set to false on watched channels in
+    // openclaw.json, which routes all messages through OpenClaw's existing
+    // Discord connection (no second WS needed).
+    setActiveGateway(null);
 
     // Clean up on plugin unload
     if (typeof (api as Record<string, unknown>).onUnload === "function") {
