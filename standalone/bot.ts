@@ -25,7 +25,7 @@ const analyzer = new Sentiment();
 
 const LATIN_SLUR_PATTERNS = [
   /\bfaggots?\b/i, /\bfags?\b/i, /\bdykes?\b/i, /\btrann(?:y|ie?)s?\b/i,
-  /\bniggers?\b/i, /\bniggas?\b/i, /\bkikes?\b/i, /\bchinks?\b/i,
+  /\bnigge(?:r|rs?|z)\b/i, /\bniggas?(?!\w)/i, /\bkikes?\b/i, /\bchinks?\b/i,
   /\bspicks?\b/i, /\bspics?\b/i, /\bwetbacks?\b/i, /\bboongas?\b/i,
   /\bboongy?\b/i, /\bcoons?\b/i, /\bgooks?\b/i, /\btowelheads?\b/i,
   /\bragheads?\b/i, /\bsandniggers?\b/i, /\bzipperheads?\b/i,
@@ -74,7 +74,6 @@ const BENIGN_PROFANITY_PATTERNS = [
 
   // Sports/slang expressions
   /\brigged\b/i,          // "sports are rigged" - common trope
-  /\bniggaz?\b/i,         // N-word used as greeting/in-group (still pass through Layer 0)
   /\bstacked\b/i,         // positive usage
   /\bdegen\b/i,           // positive in crypto context
 
@@ -645,6 +644,26 @@ function writeVibeLog(decision: Decision, meta: Record<string, unknown>): void {
   } catch { /* best-effort */ }
 }
 
+function writeEveryMessageToJsonl(msg: DiscordMessageEvent): void {
+  if (!vibeLogDir) return;
+  try {
+    const date = new Date().toISOString().slice(0, 10);
+    const logPath = path.join(vibeLogDir, `all-messages-${date}.jsonl`);
+    const entry = JSON.stringify({
+      ts: new Date().toISOString(),
+      decision: "MESSAGE_RECEIVED",
+      msgId: msg.id,
+      channelId: msg.channel_id,
+      guildId: msg.guild_id ?? null,
+      authorId: msg.author.id,
+      authorUsername: msg.author.username,
+      isBot: msg.author.bot ?? false,
+      content: msg.content,
+    }) + "\n";
+    fs.appendFileSync(logPath, entry);
+  } catch { /* best-effort */ }
+}
+
 function logDecision(decision: Decision, meta: Record<string, unknown>): void {
   logger.info(`${decision} ${JSON.stringify(meta)}`);
   if (LOGGED_DECISIONS.has(decision)) {
@@ -814,6 +833,8 @@ function startDirectGateway(
           if (msg.author?.bot) return;
           messageCount++;
           logger.info(`MESSAGE_RECEIVED msgId=${msg.id} author=${msg.author.username} channel=${msg.channel_id} msgCount=${messageCount}`);
+          // Log EVERY message to JSONL for audit trail — not just flagged ones
+          writeEveryMessageToJsonl(msg);
           try {
             await onMessage(msg);
           } catch (err) {
