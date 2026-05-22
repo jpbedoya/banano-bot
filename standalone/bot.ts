@@ -625,12 +625,40 @@ const LOGGED_DECISIONS = new Set<Decision>([
 
 let vibeLogDir: string | null = null;
 
+const ALL_MESSAGES_TTL_DAYS = 30;
+const VIBE_LOG_TTL_DAYS = 90;
+
 function initVibeLog(dataDir: string): void {
   vibeLogDir = path.join(dataDir, "logs");
   try {
     if (!fs.existsSync(vibeLogDir)) fs.mkdirSync(vibeLogDir, { recursive: true });
+    cleanupOldLogs();
   } catch {
     vibeLogDir = null;
+  }
+}
+
+function cleanupOldLogs(): void {
+  if (!vibeLogDir) return;
+  try {
+    const cutoffAll = Date.now() - ALL_MESSAGES_TTL_DAYS * 86400 * 1000;
+    const cutoffVibe = Date.now() - VIBE_LOG_TTL_DAYS * 86400 * 1000;
+    const files = fs.readdirSync(vibeLogDir);
+    let removed = 0;
+    for (const f of files) {
+      const m = f.match(/^all-messages-(\d{4}-\d{2}-\d{2})\.jsonl$/);
+      const v = f.match(/^banano-vibe-(\d{4}-\d{2}-\d{2})\.jsonl$/);
+      if (m) {
+        const d = new Date(m[1]).getTime();
+        if (d < cutoffAll) { fs.unlinkSync(path.join(vibeLogDir, f)); removed++; }
+      } else if (v) {
+        const d = new Date(v[1]).getTime();
+        if (d < cutoffVibe) { fs.unlinkSync(path.join(vibeLogDir, f)); removed++; }
+      }
+    }
+    if (removed > 0) logger.info(`Cleaned up ${removed} old log files`);
+  } catch (err) {
+    logger.warn(`Log cleanup error: ${err}`);
   }
 }
 
