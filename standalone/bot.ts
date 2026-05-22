@@ -691,6 +691,7 @@ type DiscordMessageEvent = {
   channel_id: string;
   guild_id?: string;
   content: string;
+  timestamp: string;
   author: {
     id: string;
     username: string;
@@ -1118,17 +1119,44 @@ function scheduleStatsSave(): void {
   }, 2000);
 }
 
+// ── Discord REST helpers ────────────────────────────────────────────────────
+
+async function discordFetchMessage(
+  token: string,
+  channelId: string,
+  messageId: string,
+): Promise<DiscordMessageEvent | null> {
+  try {
+    const res = await fetch(`https://discord.com/api/v10/channels/${channelId}/messages/${messageId}`, {
+      headers: {
+        Authorization: `Bot ${token}`,
+        "Content-Type": "application/json",
+        "User-Agent": "BananoVibeMonitor/1.0",
+      },
+    });
+    if (!res.ok) {
+      logger.warn(`discordFetchMessage HTTP ${res.status}`);
+      return null;
+    }
+    return await res.json() as DiscordMessageEvent;
+  } catch (err) {
+    logger.warn(`discordFetchMessage error: ${err}`);
+    return null;
+  }
+}
+
 // ── Mod commands ────────────────────────────────────────────────────────────
 //
 // Syntax (in any watched channel or mod channel):
 //   !warn @user <reason>     — public warning + strike recorded
 //   !strike @user <reason>   — same as warn (alias)
 //   !strikes @user           — show strike count for a user
+//   !debug <msgId> [channelId] — fetch a message by ID from Discord API
 //   !help                    — list available commands
 //
 // Only users listed in MODERATOR_IDS can run these commands.
 
-const MOD_COMMAND_RE = /^!(warn|strike|strikes|notify|help)\b/i;
+const MOD_COMMAND_RE = /^!(warn|strike|strikes|notify|help|debug)\b/i;
 
 async function processModCommand(
   config: VibeConfig,
@@ -1154,6 +1182,7 @@ async function processModCommand(
         "`!strike @user <reason>` — alias for !warn",
         "`!strikes @user` — show strike count for a user",
         "`!notify @user` — post formal moderation notice (uses strike count to set duration)",
+        "`!debug <msgId> [channelId]` — fetch a message by ID from Discord API",
       ].join("\n"),
     );
     return true;
@@ -1329,6 +1358,31 @@ async function processModCommand(
       ].join("\n"),
       msg.id,
     );
+    return true;
+  }
+
+  if (cmd === "!debug") {
+    // Usage: !debug <msgId> [channelId]
+    const debugMatch = content.match(/^!debug\s+(\d+)(?:\s+(\d+))?/);
+    if (!debugMatch) {
+      await sendDiscord(config.discordToken, msg.channel_id, "Usage: `!debug <msgId> [channelId]`", msg.id);
+      return true;
+    }
+    const targetMsgId = debugMatch[1];
+    const targetChannelId = debugMatch[2] || msg.channel_id;
+    const fetched = await discordFetchMessage(config.discordToken, targetChannelId, targetMsgId);
+    if (!fetched) {
+      await sendDiscord(config.discordToken, msg.channel_id, `Failed to fetch message ${targetMsgId} in channel ${targetChannelId} — HTTP error or not accessible.`, msg.id);
+      return true;
+    }
+    const ts = new Date(fetched.timestamp).toISOString();
+    const replyLines = [
+      `**Debug fetch** — msgId: \`${targetMsgId}\` channel: \`${targetChannelId}\``,
+      `Author: \`${fetched.author.username}\` (\`${fetched.author.id}\`) | Bot: ${fetched.author.bot ?? false}`,
+      `Timestamp: ${ts}`,
+      `Content: ${fetched.content || "_(empty)_\`"}`,
+    ];
+    await sendDiscord(config.discordToken, msg.channel_id, replyLines.join("\n"), msg.id);
     return true;
   }
 
