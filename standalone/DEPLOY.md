@@ -77,7 +77,35 @@ HIGH_SEVERITY_PUBLIC_REPLY=true
 VIBE_MODEL=openrouter/google/gemma-3-27b-it:free
 ```
 
-> **Note:** `.env` is gitignored. If the server dies, recreate it from the template above. The Discord token and OpenRouter key are in OpenClaw's config (`/root/.openclaw/openclaw.json` and `/root/.openclaw/agents/main/agent/auth-profiles.json`).
+### Log files
+
+```
+data/logs/
+├── banano-vibe-YYYY-MM-DD.jsonl    # decision audit (flagged messages, escalation outcomes)
+└── all-messages-YYYY-MM-DD.jsonl    # full message audit (every message received)
+```
+
+**`banano-vibe-*.jsonl` entry fields:**
+```json
+{"ts": "ISO timestamp", "decision": "ESCALATE_VIBE", "msgId": "...", "channelId": "...", "content": "...", ...}
+```
+
+**`all-messages-*.jsonl` entry fields:**
+```json
+{
+  "ts": "ISO timestamp",
+  "decision": "MESSAGE_RECEIVED",
+  "msgId": "...",
+  "channelId": "...",
+  "guildId": "...",
+  "authorId": "...",
+  "authorUsername": "...",
+  "isBot": false,
+  "content": "..."
+}
+```
+
+> Audit logs are written for every message regardless of whether it was flagged — useful for reconstructing exactly what happened when reviewing an incident.
 
 ---
 
@@ -88,11 +116,16 @@ VIBE_MODEL=openrouter/google/gemma-3-27b-it:free
 systemctl status banano-vibe
 ```
 
-### View logs
+### Check audit logs (every message)
 ```bash
-journalctl -u banano-vibe -f           # live tail
-journalctl -u banano-vibe -n 50        # last 50 lines
-journalctl -u banano-vibe --since "1 hour ago"
+# Live tail of all messages received
+echo 'Watching incoming messages…' && tail -f data/logs/all-messages-$(date +%Y-%m-%d).jsonl
+
+# Search logs for a specific user or content
+grep -i "niggaz\|slur\|flagged" data/logs/all-messages-*.jsonl
+
+# Review today's decision audit (flagged messages only)
+cat data/logs/banano-vibe-$(date +%Y-%m-%d).jsonl
 ```
 
 ### Restart the bot
