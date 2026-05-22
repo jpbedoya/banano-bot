@@ -141,6 +141,15 @@ cd standalone && npm install && npm run build
 systemctl restart banano-vibe
 ```
 
+### Debug fetch a message (retrieves content by ID from Discord API)
+```bash
+# In any watched or mod channel, mention the bot and run:
+!debug <msgId> [channelId]
+# Example: !debug 123456789012345678
+# If the channel is different from where you run the command, pass it:
+!debug 123456789012345678 1485792688677589144
+```
+
 ### Edit the AI prompt
 ```bash
 nano /root/.openclaw/workspace/code/banano-vibe-monitor/standalone/prompt.txt
